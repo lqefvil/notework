@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  row.ui — 单行数据的渲染模板
+  GtkBuilderListItemFactory 会按需复用这种 GtkListItem 实例，
+  实现"百万行只渲染屏幕可见的几十行"的虚拟列表。
+-->
+<interface>
+  <template class="GtkListItem">
+    <property name="child">
+      <object class="GtkBox">
+        <property name="orientation">horizontal</property>
+        <!-- 不再设 height-request：让 label 字体自然决定行高（~15px） -->
+        <property name="margin-start">12</property>
+        <property name="margin-end">12</property>
+
+        <child>
+          <object class="GtkLabel">
+            <property name="xalign">0</property>
+            <property name="hexpand">true</property>
+            <property name="css-classes">data-row</property>     <!-- 通过 CSS 缩字体、清 padding -->
+            <!-- 数据绑定：把 GtkStringObject.string 自动同步到 label 上 -->
+            <binding name="label">
+              <lookup name="string" type="GtkStringObject">
+                <lookup name="item">GtkListItem</lookup>
+              </lookup>
+            </binding>
+          </object>
+        </child>
+      </object>
+    </property>
+  </template>
+</interface>

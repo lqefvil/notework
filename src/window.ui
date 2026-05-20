@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  window.ui — 主窗口
+  结构：
+    AdwApplicationWindow
+    └── AdwToolbarView
+        ├── [top]     AdwHeaderBar（含 +/− 按钮）
+        └── [content] GtkBox (vertical)
+            ├── GtkScrolledWindow header_scroller    (hscroll=external, vscroll=never)
+            │   └── GtkBox baseline_row              (高 40，CSS 类 baseline-frame)
+            │       └── GtkLabel baseline_label      (xalign=0)
+            └── GtkScrolledWindow body_scroller      (hscroll/vscroll=automatic)
+                └── GtkListView data_list            (CSS 类 flat-rows，工厂引用 row.ui)
+
+  基准行与数据行结构对称（GtkBox + GtkLabel + 两侧 12px margin），
+  仅以 CSS class 区分外观。两个 ScrolledWindow 的水平 GtkAdjustment
+  在 main.c 中单向同步（body → header），形成“冻结表头”效果。
+-->
+<interface>
+  <requires lib="gtk" version="4.10"/>
+  <requires lib="libadwaita" version="1.0"/>
+
+  <object class="AdwApplicationWindow" id="main_window">
+    <property name="title">Notework</property>
+    <property name="default-width">800</property>
+    <property name="default-height">600</property>
+
+    <property name="content">
+      <object class="AdwToolbarView">
+
+        <!-- 顶部标题栏 -->
+        <child type="top">
+          <object class="AdwHeaderBar">
+            <child type="end">
+              <object class="GtkButton" id="add_row_btn">
+                <property name="label">＋ 添加行</property>
+                <property name="tooltip-text">在末尾追加一行</property>
+              </object>
+            </child>
+            <child type="end">
+              <object class="GtkButton" id="del_row_btn">
+                <property name="label">－ 删除行</property>
+                <property name="tooltip-text">删除最后一行</property>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- 中央内容区 -->
+        <property name="content">
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+
+            <!-- (1) 基准行：表头载体，可被外部控制水平滚动 -->
+            <child>
+              <object class="GtkScrolledWindow" id="header_scroller">
+                <property name="hscrollbar-policy">external</property>
+                <property name="vscrollbar-policy">never</property>
+                <property name="propagate-natural-height">true</property>
+                <child>
+                  <object class="GtkBox" id="baseline_row">
+                    <property name="orientation">horizontal</property>
+                    <property name="height-request">40</property>
+                    <property name="margin-start">12</property>
+                    <property name="margin-end">12</property>
+                    <property name="css-classes">baseline-frame</property>
+                    <child>
+                      <object class="GtkLabel" id="baseline_label">
+                        <property name="label">基准行（高 40px，水平随下方同步滚动）</property>
+                        <property name="xalign">0</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <!-- (2) 数据列表：虚拟列表，独立接管水平/垂直滚动 -->
+            <child>
+              <object class="GtkScrolledWindow" id="body_scroller">
+                <property name="hscrollbar-policy">automatic</property>
+                <property name="vscrollbar-policy">automatic</property>
+                <property name="vexpand">true</property>
+                <child>
+                  <object class="GtkListView" id="data_list">
+                    <property name="show-separators">true</property>
+                    <property name="single-click-activate">false</property>
+                    <property name="css-classes">flat-rows</property>
+                    <property name="model">
+                      <object class="GtkNoSelection" id="data_selection"/>
+                    </property>
+                    <property name="factory">
+                      <object class="GtkBuilderListItemFactory">
+                        <property name="resource">/com/github/notework/row.ui</property>
+                      </object>
+                    </property>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+          </object>
+        </property>
+
+      </object>
+    </property>
+  </object>
+</interface>

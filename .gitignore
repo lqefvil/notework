@@ -1,0 +1,46 @@
+# ===== Meson / Ninja 构建目录 =====
+builddir/
+build/
+build-*/
+subprojects/packagecache/
+subprojects/*/
+
+# 保留 subprojects 里的 .wrap 描述文件（如果以后用到）
+!subprojects/*.wrap
+
+# ===== 编译产物 =====
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+
+# 可执行文件（项目目标名）
+notework
+
+# ===== GResource 中间产物 =====
+*.gresource
+*-resources.c
+*-resources.h
+
+# ===== 编辑器 / IDE =====
+.vscode/
+.idea/
+.cache/
+*.swp
+*.swo
+*~
+.ccls-cache/
+compile_commands.json
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+
+# ===== 日志 / 临时文件 =====
+*.log
+*.tmp
+core
+core.*

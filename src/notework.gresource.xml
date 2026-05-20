@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  notework.gresource.xml — GResource 清单
+  将 UI XML 嵌入到可执行文件中，运行时无需读取磁盘文件
+-->
+<gresources>
+  <gresource prefix="/com/github/notework">
+    <file preprocess="xml-stripblanks">window.ui</file>
+    <file preprocess="xml-stripblanks">row.ui</file>
+    <file>style.css</file>
+  </gresource>
+</gresources>
