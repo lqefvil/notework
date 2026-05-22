@@ -25,3 +25,22 @@ listview.flat-rows > row {
     padding: 0;
     margin: 0;
 }
+
+/* ─── 涂鸦模块样式 ─────────────────────────────────────────────── */
+
+/* 画布背景：纯白 + 极浅描边由 cairo 自行绘制；这里仅占位 */
+.doodle-canvas {
+    background-color: #ffffff;
+}
+
+/* 缺号提示：默认浅色信息文本 */
+.doodle-missing {
+    font-size: 9pt;
+    color: alpha(currentColor, 0.65);
+}
+
+/* 缺号提示：检测到重复编号时变红 */
+.doodle-missing.doodle-warn-dup {
+    color: #c33;
+    font-weight: bold;
+}

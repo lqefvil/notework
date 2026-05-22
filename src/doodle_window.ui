@@ -1,0 +1,287 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  doodle_window.ui — 涂鸦窗口骨架
+  结构：
+    AdwApplicationWindow#dwin
+    └── AdwToolbarView
+        ├── [top] AdwHeaderBar          ← 工具切换 ToggleButton 组（直/路/擦/选）
+        └── [content] GtkPaned          ← 左：画布占位 GtkBox#canvas_holder
+                                          右：缺号提示 / 编号列表 / 阵列参数 / 图层列表
+  画布本身在 doodle_window.c 中通过 doodle_canvas_new() 构造并 append 到
+  canvas_holder。SpinButton / 按钮 / 列表的 id 与 doodle_window.c 中保持一致。
+-->
+<interface>
+  <requires lib="gtk" version="4.10"/>
+  <requires lib="libadwaita" version="1.0"/>
+
+  <object class="AdwApplicationWindow" id="dwin">
+    <property name="title">Notework — 涂鸦</property>
+    <property name="default-width">1180</property>
+    <property name="default-height">760</property>
+
+    <property name="content">
+      <object class="AdwToolbarView">
+
+        <!-- 顶部工具切换 -->
+        <child type="top">
+          <object class="AdwHeaderBar">
+            <child type="end">
+              <object class="GtkBox">
+                <property name="spacing">4</property>
+                <property name="css-classes">linked</property>
+                <child>
+                  <object class="GtkToggleButton" id="tool_select_btn">
+                    <property name="label">选择</property>
+                    <property name="tooltip-text">选中并拖动图形</property>
+                    <property name="active">true</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkToggleButton" id="tool_line_btn">
+                    <property name="label">直线</property>
+                    <property name="tooltip-text">绘制直线</property>
+                    <property name="group">tool_select_btn</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkToggleButton" id="tool_path_btn">
+                    <property name="label">手绘</property>
+                    <property name="tooltip-text">手绘线条</property>
+                    <property name="group">tool_select_btn</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkToggleButton" id="tool_erase_btn">
+                    <property name="label">擦除</property>
+                    <property name="tooltip-text">擦除（手绘线/直线会按擦除位置自动断开为多段并重新编号；阵列会被展开为独立副本后参与擦除）</property>
+                    <property name="group">tool_select_btn</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- 主体：左画布 / 右面板 -->
+        <property name="content">
+          <object class="GtkPaned">
+            <property name="orientation">horizontal</property>
+            <property name="position">860</property>
+            <property name="resize-start-child">true</property>
+            <property name="resize-end-child">false</property>
+            <property name="shrink-start-child">false</property>
+            <property name="shrink-end-child">false</property>
+
+            <property name="start-child">
+              <object class="GtkBox" id="canvas_holder">
+                <property name="orientation">vertical</property>
+                <property name="hexpand">true</property>
+                <property name="vexpand">true</property>
+              </object>
+            </property>
+
+            <property name="end-child">
+              <object class="GtkBox">
+                <property name="orientation">vertical</property>
+                <property name="margin-start">10</property>
+                <property name="margin-end">10</property>
+                <property name="margin-top">10</property>
+                <property name="margin-bottom">10</property>
+                <property name="spacing">10</property>
+                <property name="width-request">300</property>
+
+                <!-- 缺号提示 -->
+                <child>
+                  <object class="GtkLabel" id="missing_label">
+                    <property name="xalign">0</property>
+                    <property name="wrap">true</property>
+                    <property name="label">缺号: —</property>
+                    <property name="css-classes">doodle-missing</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="compact_btn">
+                    <property name="label">整理编号（紧凑为 1..N）</property>
+                    <property name="halign">start</property>
+                    <property name="tooltip-text">按当前画布顺序把所有编号重排为 1..N 连续序列</property>
+                  </object>
+                </child>
+
+                <!-- 编号列表 -->
+                <child>
+                  <object class="GtkLabel">
+                    <property name="xalign">0</property>
+                    <property name="label">编号列表（可双击编号修改）</property>
+                    <property name="css-classes">heading</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkScrolledWindow">
+                    <property name="vexpand">true</property>
+                    <property name="hscrollbar-policy">never</property>
+                    <property name="min-content-height">220</property>
+                    <child>
+                      <object class="GtkListBox" id="numbers_list">
+                        <property name="selection-mode">none</property>
+                        <property name="css-classes">boxed-list</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+
+                <child>
+                  <object class="GtkSeparator"/>
+                </child>
+
+                <!-- 阵列参数 -->
+                <child>
+                  <object class="GtkLabel">
+                    <property name="xalign">0</property>
+                    <property name="label">阵列（先选中一个图形再开始预览）</property>
+                    <property name="css-classes">heading</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkGrid">
+                    <property name="row-spacing">4</property>
+                    <property name="column-spacing">8</property>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">行</property>
+                        <property name="xalign">0</property>
+                        <layout><property name="column">0</property><property name="row">0</property></layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkSpinButton" id="ar_rows_spin">
+                        <property name="adjustment">
+                          <object class="GtkAdjustment">
+                            <property name="lower">1</property>
+                            <property name="upper">100</property>
+                            <property name="step-increment">1</property>
+                            <property name="value">2</property>
+                          </object>
+                        </property>
+                        <layout><property name="column">1</property><property name="row">0</property></layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">列</property>
+                        <property name="xalign">0</property>
+                        <layout><property name="column">2</property><property name="row">0</property></layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkSpinButton" id="ar_cols_spin">
+                        <property name="adjustment">
+                          <object class="GtkAdjustment">
+                            <property name="lower">1</property>
+                            <property name="upper">100</property>
+                            <property name="step-increment">1</property>
+                            <property name="value">3</property>
+                          </object>
+                        </property>
+                        <layout><property name="column">3</property><property name="row">0</property></layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">水平间距</property>
+                        <property name="xalign">0</property>
+                        <layout><property name="column">0</property><property name="row">1</property></layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkSpinButton" id="ar_gx_spin">
+                        <property name="adjustment">
+                          <object class="GtkAdjustment">
+                            <property name="lower">0</property>
+                            <property name="upper">2000</property>
+                            <property name="step-increment">5</property>
+                            <property name="value">80</property>
+                          </object>
+                        </property>
+                        <layout><property name="column">1</property><property name="row">1</property></layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">垂直间距</property>
+                        <property name="xalign">0</property>
+                        <layout><property name="column">2</property><property name="row">1</property></layout>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkSpinButton" id="ar_gy_spin">
+                        <property name="adjustment">
+                          <object class="GtkAdjustment">
+                            <property name="lower">0</property>
+                            <property name="upper">2000</property>
+                            <property name="step-increment">5</property>
+                            <property name="value">60</property>
+                          </object>
+                        </property>
+                        <layout><property name="column">3</property><property name="row">1</property></layout>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+
+                <child>
+                  <object class="GtkBox">
+                    <property name="spacing">6</property>
+                    <child>
+                      <object class="GtkButton" id="ar_start_btn">
+                        <property name="label">开始预览</property>
+                        <property name="hexpand">true</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="ar_apply_btn">
+                        <property name="label">应用</property>
+                        <property name="sensitive">false</property>
+                        <property name="css-classes">suggested-action</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="ar_cancel_btn">
+                        <property name="label">取消</property>
+                        <property name="sensitive">false</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+
+                <child>
+                  <object class="GtkSeparator"/>
+                </child>
+
+                <!-- 图层 -->
+                <child>
+                  <object class="GtkLabel">
+                    <property name="xalign">0</property>
+                    <property name="label">图层（自上而下）</property>
+                    <property name="css-classes">heading</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkListBox" id="layers_list">
+                    <property name="selection-mode">none</property>
+                    <property name="css-classes">boxed-list</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="add_image_layer_btn">
+                    <property name="label">在涂鸦层下方插入图片图层</property>
+                    <property name="tooltip-text">仅创建占位层，图片加载与渲染后续阶段实现</property>
+                  </object>
+                </child>
+              </object>
+            </property>
+          </object>
+        </property>
+      </object>
+    </property>
+  </object>
+</interface>
