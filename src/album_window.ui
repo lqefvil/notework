@@ -1,0 +1,266 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  album_window.ui — 相册/多页编辑主窗口骨架
+
+  结构：
+    AdwApplicationWindow#awin
+    └── AdwToolbarView
+        ├── [top] AdwHeaderBar
+        │     [start] 导入图片 / 导入PDF
+        │     [end]   涂鸦本页 / 复制图层 / 应用淡显（toggle）
+        └── [content] GtkPaned (横向)
+              start: ScrolledWindow > GtkListBox#pages_list   (左：缩略图列表)
+              end  : GtkPaned (横向)
+                       start: GtkBox#preview_holder           (中：预览画布)
+                       end  : GtkBox 右侧图层面板
+                                ├── 标题
+                                ├── ScrolledWindow > GtkListBox#layers_list
+                                ├── 状态标签
+                                └── 图层操作按钮组
+-->
+<interface>
+  <requires lib="gtk" version="4.10"/>
+  <requires lib="libadwaita" version="1.0"/>
+
+  <object class="AdwApplicationWindow" id="awin">
+    <property name="title">Notework — 相册</property>
+    <property name="default-width">1280</property>
+    <property name="default-height">820</property>
+
+    <property name="content">
+      <object class="AdwToolbarView">
+        <child type="top">
+          <object class="AdwHeaderBar">
+            <child type="start">
+              <object class="GtkBox">
+                <property name="spacing">4</property>
+                <property name="css-classes">linked</property>
+                <child>
+                  <object class="GtkButton" id="import_image_btn">
+                    <property name="label">导入图片</property>
+                    <property name="tooltip-text">批量导入 jpeg/png 等图片，每张一页</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="import_pdf_btn">
+                    <property name="label">导入 PDF</property>
+                    <property name="tooltip-text">导入 PDF，按页拆分成图片</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+
+            <child type="end">
+              <object class="GtkBox">
+                <property name="spacing">6</property>
+                <child>
+                  <object class="GtkButton" id="doodle_btn">
+                    <property name="label">涂鸦本页</property>
+                    <property name="tooltip-text">弹出涂鸦窗口编辑当前页的涂鸦层</property>
+                    <property name="css-classes">suggested-action</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="copy_layer_btn">
+                    <property name="label">复制图层…</property>
+                    <property name="tooltip-text">把当前选中的图层批量复制到其他页</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkToggleButton" id="apply_toggle">
+                    <property name="label">应用淡显</property>
+                    <property name="tooltip-text">切换当前页涂鸦层在预览中的不透明度（极淡/正常）</property>
+                    <property name="active">true</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <property name="content">
+          <object class="GtkPaned" id="outer_paned">
+            <property name="orientation">horizontal</property>
+            <property name="position">220</property>
+            <property name="resize-start-child">false</property>
+            <property name="resize-end-child">true</property>
+            <property name="shrink-start-child">false</property>
+            <property name="shrink-end-child">false</property>
+
+            <!-- 左：缩略图列表 -->
+            <property name="start-child">
+              <object class="GtkBox">
+                <property name="orientation">vertical</property>
+                <property name="width-request">200</property>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">页面</property>
+                    <property name="xalign">0</property>
+                    <property name="margin-start">10</property>
+                    <property name="margin-end">10</property>
+                    <property name="margin-top">8</property>
+                    <property name="margin-bottom">4</property>
+                    <property name="css-classes">heading</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkScrolledWindow">
+                    <property name="vexpand">true</property>
+                    <property name="hscrollbar-policy">never</property>
+                    <child>
+                      <object class="GtkListBox" id="pages_list">
+                        <property name="selection-mode">single</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox">
+                    <property name="margin-start">8</property>
+                    <property name="margin-end">8</property>
+                    <property name="margin-top">6</property>
+                    <property name="margin-bottom">8</property>
+                    <property name="spacing">4</property>
+                    <child>
+                      <object class="GtkButton" id="page_up_btn">
+                        <property name="label">上移</property>
+                        <property name="hexpand">true</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="page_down_btn">
+                        <property name="label">下移</property>
+                        <property name="hexpand">true</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="page_delete_btn">
+                        <property name="label">删除</property>
+                        <property name="tooltip-text">删除当前页</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </property>
+
+            <property name="end-child">
+              <object class="GtkPaned" id="inner_paned">
+                <property name="orientation">horizontal</property>
+                <property name="position">920</property>
+                <property name="resize-start-child">true</property>
+                <property name="resize-end-child">false</property>
+                <property name="shrink-start-child">true</property>
+                <property name="shrink-end-child">true</property>
+
+                <!-- 中：当前页预览 + 状态信息栏（随窗口拉宽同步扩充） -->
+                <property name="start-child">
+                  <object class="GtkBox" id="center_col">
+                    <property name="orientation">vertical</property>
+                    <property name="hexpand">true</property>
+                    <property name="vexpand">true</property>
+                    <child>
+                      <object class="GtkBox" id="preview_holder">
+                        <property name="orientation">vertical</property>
+                        <property name="hexpand">true</property>
+                        <property name="vexpand">true</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel" id="status_label">
+                        <property name="xalign">0</property>
+                        <property name="wrap">true</property>
+                        <property name="margin-start">10</property>
+                        <property name="margin-end">10</property>
+                        <property name="margin-top">4</property>
+                        <property name="label">尚未导入任何页</property>
+                        <property name="css-classes">dim-label</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel" id="selection_info_label">
+                        <property name="xalign">0</property>
+                        <property name="wrap">true</property>
+                        <property name="margin-start">10</property>
+                        <property name="margin-end">10</property>
+                        <property name="margin-bottom">6</property>
+                        <property name="label"></property>
+                        <property name="css-classes">dim-label</property>
+                      </object>
+                    </child>
+                  </object>
+                </property>
+
+                <!-- 右：图层面板（宽度可被拖动压缩至极窄） -->
+                <property name="end-child">
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+                    <property name="margin-start">10</property>
+                    <property name="margin-end">10</property>
+                    <property name="margin-top">10</property>
+                    <property name="margin-bottom">10</property>
+                    <property name="spacing">8</property>
+                    <property name="width-request">50</property>
+
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="xalign">0</property>
+                        <property name="label">图层（自上而下）</property>
+                        <property name="css-classes">heading</property>
+                      </object>
+                    </child>
+
+                    <child>
+                      <object class="GtkScrolledWindow">
+                        <property name="vexpand">true</property>
+                        <property name="hscrollbar-policy">never</property>
+                        <property name="min-content-height">320</property>
+                        <child>
+                          <object class="GtkListBox" id="layers_list">
+                            <property name="selection-mode">single</property>
+                            <property name="css-classes">boxed-list</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+
+                    <child>
+                      <object class="GtkBox">
+                        <property name="spacing">4</property>
+                        <child>
+                          <object class="GtkButton" id="layer_up_btn">
+                            <property name="label">上移</property>
+                            <property name="hexpand">true</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="layer_down_btn">
+                            <property name="label">下移</property>
+                            <property name="hexpand">true</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="layer_visible_btn">
+                            <property name="label">隐/显</property>
+                            <property name="hexpand">true</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkButton" id="layer_delete_btn">
+                            <property name="label">删除</property>
+                            <property name="hexpand">true</property>
+                            <property name="css-classes">destructive-action</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </property>
+              </object>
+            </property>
+          </object>
+        </property>
+      </object>
+    </property>
+  </object>
+</interface>

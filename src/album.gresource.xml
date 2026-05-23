@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  album.gresource.xml — 相册模块资源清单
+  使用单独 prefix 避免与主程序冲突；同时复用主程序 style.css。
+  另同时注册 doodle_window.ui——本模块会弹出 doodle_window
+  对单页进行涂鸦编辑，doodle_window.c 依赖该资源路径。
+-->
+<gresources>
+  <gresource prefix="/com/github/notework/album">
+    <file preprocess="xml-stripblanks">album_window.ui</file>
+  </gresource>
+  <gresource prefix="/com/github/notework/doodle">
+    <file preprocess="xml-stripblanks">doodle_window.ui</file>
+  </gresource>
+  <gresource prefix="/com/github/notework">
+    <file>style.css</file>
+  </gresource>
+</gresources>

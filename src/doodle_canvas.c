@@ -51,6 +51,10 @@ typedef struct {
     /* 变更回调 */
     DoodleChangedFn changed_cb;
     gpointer        changed_data;
+
+    /* 渲染开关 */
+    double   doodle_alpha;     /* 默认 1.0；album 预览调用使用 0.25 */
+    gboolean view_only;        /* TRUE 时忽略所有输入交互 */
 } CanvasCtx;
 
 #define CTX_KEY "doodle-canvas-ctx"
@@ -201,16 +205,17 @@ static void cairo_path_for_path_shape(cairo_t *cr, const Shape *s,
 
 static void draw_shape_geom(cairo_t *cr, const Shape *s,
                             double ox, double oy) {
-    cairo_set_line_width(cr, 2.0);
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
     cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
     switch (s->kind) {
     case SHAPE_LINE:
+        cairo_set_line_width(cr, 1.0);
         cairo_move_to(cr, s->u.line.a.x + ox, s->u.line.a.y + oy);
         cairo_line_to(cr, s->u.line.b.x + ox, s->u.line.b.y + oy);
         cairo_stroke(cr);
         break;
     case SHAPE_PATH:
+        cairo_set_line_width(cr, 1.0);
         cairo_path_for_path_shape(cr, s, ox, oy);
         cairo_stroke(cr);
         break;
@@ -281,6 +286,91 @@ static gboolean idx_in_array(GArray *a, int v) {
     return FALSE;
 }
 
+/* 在指定 cairo_t 上画出 doc 的图层叠加结果（不含交互覆层）。
+ * 按图层下到上顺序绘制：LAYER_IMAGE_STUB 画 surface，LAYER_DOODLE 按原逻辑。
+ * skip_array_idx_set 可传 NULL；如仅在阵列预览期需要隐藏部分选中时使用。 */
+static void render_doc_layers(cairo_t *cr, DoodleDoc *doc,
+                              double doodle_alpha,
+                              GArray *skip_array_idx_set,
+                              const DoodleDoc *active_doc_for_skip) {
+    (void)active_doc_for_skip;
+    int n_layers = doc_layer_count(doc);
+    for (int li = 0; li < n_layers; li++) {
+        Layer *L = &g_array_index(doc->layers, Layer, li);
+        if (!L->visible) continue;
+
+        if (L->kind == LAYER_IMAGE_STUB) {
+            if (!L->surface) continue;
+            cairo_save(cr);
+            cairo_translate(cr, L->x, L->y);
+            double s = (L->scale != 0.0) ? L->scale : 1.0;
+            if (s != 1.0) cairo_scale(cr, s, s);
+            cairo_set_source_surface(cr, L->surface, 0, 0);
+            cairo_paint(cr);
+            cairo_restore(cr);
+            continue;
+        }
+
+        if (L->kind != LAYER_DOODLE) continue;
+        ShapeStore *st = &L->store;
+
+        cairo_save(cr);
+        cairo_push_group(cr);
+
+        for (gsize i = 0; i < st->n; i++) {
+            Shape *s = st->items[i];
+
+            if (skip_array_idx_set &&
+                idx_in_array(skip_array_idx_set, (int)i)) continue;
+
+            cairo_set_source_rgb(cr, 0.13, 0.13, 0.13);
+            if (s->kind == SHAPE_ARRAY) {
+                for (int r = 0; r < s->u.arr.rows; r++) {
+                    for (int co = 0; co < s->u.arr.cols; co++) {
+                        for (int b = 0; b < s->u.arr.n_bases; b++) {
+                            Shape *bb = s->u.arr.bases[b];
+                            double ox = s->dx + co * s->u.arr.gap_x + bb->dx;
+                            double oy = s->dy + r  * s->u.arr.gap_y + bb->dy;
+                            draw_shape_geom(cr, bb, ox, oy);
+                            double ax, ay;
+                            shape_anchor(bb, &ax, &ay);
+                            gsize slot = ((gsize)r * s->u.arr.cols + co)
+                                       * s->u.arr.n_bases + b;
+                            draw_number_label(cr,
+                                s->u.arr.child_numbers[slot],
+                                ax + ox + 4, ay + oy - 14);
+                        }
+                    }
+                }
+            } else {
+                draw_shape_geom(cr, s, s->dx, s->dy);
+                double ax, ay;
+                shape_anchor(s, &ax, &ay);
+                draw_number_label(cr, s->number, ax + s->dx + 4,
+                                  ay + s->dy - 14);
+            }
+        }
+
+        cairo_pop_group_to_source(cr);
+        cairo_paint_with_alpha(cr, doodle_alpha);
+        cairo_restore(cr);
+    }
+}
+
+void doodle_render_doc(cairo_t *cr, DoodleDoc *doc,
+                       double doodle_alpha, int width, int height) {
+    cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+    cairo_paint(cr);
+    cairo_set_source_rgba(cr, 0, 0, 0, 0.12);
+    cairo_set_line_width(cr, 1.0);
+    cairo_rectangle(cr, 0.5, 0.5, width - 1, height - 1);
+    cairo_stroke(cr);
+    if (!doc) return;
+    if (doodle_alpha < 0.0) doodle_alpha = 0.0;
+    if (doodle_alpha > 1.0) doodle_alpha = 1.0;
+    render_doc_layers(cr, doc, doodle_alpha, NULL, NULL);
+}
+
 static void on_draw(GtkDrawingArea *area, cairo_t *cr,
                     int width, int height, gpointer user_data) {
     (void)area;
@@ -295,18 +385,38 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr,
 
     if (!c->doc) return;
 
+    /* 阵列预览期隐藏选中的基准图形（仅 active doodle 层生效）
+     * 这里仍复用原逻辑，skip 仅在 active 层发生。
+     * 为避免在其他图层也跳过，这里随 active_layer 判断。 */
+    int active = c->doc->active_layer;
     int n_layers = doc_layer_count(c->doc);
     for (int li = 0; li < n_layers; li++) {
         Layer *L = &g_array_index(c->doc->layers, Layer, li);
         if (!L->visible) continue;
+
+        if (L->kind == LAYER_IMAGE_STUB) {
+            if (!L->surface) continue;
+            cairo_save(cr);
+            cairo_translate(cr, L->x, L->y);
+            double s = (L->scale != 0.0) ? L->scale : 1.0;
+            if (s != 1.0) cairo_scale(cr, s, s);
+            cairo_set_source_surface(cr, L->surface, 0, 0);
+            cairo_paint(cr);
+            cairo_restore(cr);
+            continue;
+        }
+
         if (L->kind != LAYER_DOODLE) continue;
         ShapeStore *st = &L->store;
+
+        cairo_save(cr);
+        cairo_push_group(cr);
 
         for (gsize i = 0; i < st->n; i++) {
             Shape *s = st->items[i];
 
-            /* 阵列预览期间隐藏所有选中的基准 */
-            if (c->array_active &&
+            /* 阵列预览期间隐藏所有选中的基准（仅 active doodle 层） */
+            if (li == active && c->array_active &&
                 idx_in_array(c->array_preview_idx, (int)i)) continue;
 
             cairo_set_source_rgb(cr, 0.13, 0.13, 0.13);
@@ -328,25 +438,40 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr,
                         }
                     }
                 }
-                if (is_selected(c, (int)i)) draw_selection_box(cr, s);
+                if (li == active && is_selected(c, (int)i)) draw_selection_box(cr, s);
             } else {
                 draw_shape_geom(cr, s, s->dx, s->dy);
                 double ax, ay;
                 shape_anchor(s, &ax, &ay);
                 draw_number_label(cr, s->number, ax + s->dx + 4,
                                   ay + s->dy - 14);
-                if (is_selected(c, (int)i)) draw_selection_box(cr, s);
+                if (li == active && is_selected(c, (int)i)) draw_selection_box(cr, s);
             }
         }
+
+        cairo_pop_group_to_source(cr);
+        cairo_paint_with_alpha(cr, c->doodle_alpha);
+        cairo_restore(cr);
     }
 
-    /* 直线橡皮筋 */
+    /* 直线橡皮筋（含过起点的水平参考线） */
     if (c->drawing_line) {
+        /* 水平参考线：横贯画布的细虚线，走过起点 y */
+        cairo_save(cr);
+        double href_dashes[] = { 4.0, 4.0 };
+        cairo_set_source_rgba(cr, 0.13, 0.45, 0.85, 0.35);
+        cairo_set_line_width(cr, 1.0);
+        cairo_set_dash(cr, href_dashes, 2, 0);
+        cairo_move_to(cr, 0,     c->line_start.y);
+        cairo_line_to(cr, width, c->line_start.y);
+        cairo_stroke(cr);
+        cairo_restore(cr);
+
         cairo_save(cr);
         cairo_set_source_rgba(cr, 0.13, 0.45, 0.85, 0.8);
-        cairo_set_line_width(cr, 2.0);
+        cairo_set_line_width(cr, 1.0);
         cairo_move_to(cr, c->line_start.x, c->line_start.y);
-        cairo_line_to(cr, c->line_cur.x, c->line_cur.y);
+        cairo_line_to(cr, c->line_cur.x,   c->line_cur.y);
         cairo_stroke(cr);
         cairo_restore(cr);
     }
@@ -355,7 +480,7 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr,
     if (c->path_pending && c->path_pending->u.path.n >= 2) {
         cairo_save(cr);
         cairo_set_source_rgba(cr, 0.13, 0.45, 0.85, 0.8);
-        cairo_set_line_width(cr, 2.0);
+        cairo_set_line_width(cr, 1.0);
         cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
         cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
         cairo_path_for_path_shape(cr, c->path_pending, 0, 0);
@@ -576,6 +701,7 @@ static void on_drag_begin(GtkGestureDrag *g, double sx, double sy,
                           gpointer data) {
     CanvasCtx *c = data;
     if (!c->doc) return;
+    if (c->view_only) return;
 
     if (c->array_active) {
         c->ar_drag_orig_dx = c->ar_dx;
@@ -645,6 +771,7 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
                            gpointer data) {
     CanvasCtx *c = data;
     if (!c->doc) return;
+    if (c->view_only) return;
 
     double sx, sy;
     gtk_gesture_drag_get_start_point(g, &sx, &sy);
@@ -699,6 +826,7 @@ static void on_drag_end(GtkGestureDrag *g, double ox, double oy,
                         gpointer data) {
     CanvasCtx *c = data;
     if (!c->doc) return;
+    if (c->view_only) return;
 
     double sx, sy;
     gtk_gesture_drag_get_start_point(g, &sx, &sy);
@@ -783,6 +911,8 @@ GtkWidget *doodle_canvas_new(DoodleDoc *doc) {
     c->ar_cols           = 3;
     c->ar_gap_x          = 80;
     c->ar_gap_y          = 60;
+    c->doodle_alpha      = 1.0;
+    c->view_only         = FALSE;
     g_object_set_data_full(G_OBJECT(area), CTX_KEY, c, ctx_free);
 
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(area), on_draw, c, NULL);
@@ -934,4 +1064,28 @@ void doodle_canvas_cancel_array(GtkWidget *w) {
     g_array_set_size(c->array_preview_idx, 0);
     c->ar_dx = c->ar_dy = 0;
     notify_changed(c);
+}
+
+void doodle_canvas_set_doodle_alpha(GtkWidget *w, double alpha) {
+    CanvasCtx *c = ctx_of(w);
+    if (alpha < 0.0) alpha = 0.0;
+    if (alpha > 1.0) alpha = 1.0;
+    c->doodle_alpha = alpha;
+    gtk_widget_queue_draw(w);
+}
+
+void doodle_canvas_set_view_only(GtkWidget *w, gboolean view_only) {
+    CanvasCtx *c = ctx_of(w);
+    c->view_only = view_only;
+    if (view_only) {
+        c->drawing_line = FALSE;
+        if (c->path_pending) {
+            shape_free(c->path_pending);
+            c->path_pending = NULL;
+        }
+        c->drag_moving = FALSE;
+        g_array_set_size(c->sel_origs, 0);
+        selection_clear(c);
+    }
+    gtk_widget_queue_draw(w);
 }

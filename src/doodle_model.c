@@ -141,19 +141,86 @@ static void store_remove_at(ShapeStore *st, gsize idx) {
 
 static void layer_clear(Layer *l) {
     if (l->kind == LAYER_DOODLE) store_clear(&l->store);
+    if (l->surface) {
+        cairo_surface_destroy(l->surface);
+        l->surface = NULL;
+    }
     g_free(l->name);
+    l->name = NULL;
+}
+
+void layer_free_contents(Layer *l) {
+    if (!l) return;
+    layer_clear(l);
+}
+
+Layer layer_new_doodle_value(const char *name) {
+    Layer l = { 0 };
+    l.kind    = LAYER_DOODLE;
+    l.visible = TRUE;
+    l.name    = g_strdup(name ? name : "涂鸦层");
+    store_init(&l.store);
+    l.scale   = 1.0;
+    return l;
+}
+
+Layer layer_new_image_value(cairo_surface_t *surface, const char *name) {
+    Layer l = { 0 };
+    l.kind    = LAYER_IMAGE_STUB;
+    l.visible = TRUE;
+    l.name    = g_strdup(name ? name : "图片层");
+    store_init(&l.store);
+    l.scale   = 1.0;
+    if (surface) {
+        l.surface = cairo_surface_reference(surface);
+        l.img_w   = cairo_image_surface_get_width (surface);
+        l.img_h   = cairo_image_surface_get_height(surface);
+    }
+    return l;
+}
+
+/* 深拷贝 ShapeStore */
+static void store_deep_copy(ShapeStore *dst, const ShapeStore *src) {
+    store_init(dst);
+    for (gsize i = 0; i < src->n; i++) {
+        Shape *clone = shape_clone(src->items[i]);
+        store_append(dst, clone);
+    }
+}
+
+Layer layer_clone_value(const Layer *src) {
+    Layer l = { 0 };
+    l.kind    = src->kind;
+    l.visible = src->visible;
+    l.name    = g_strdup(src->name);
+    l.scale   = src->scale != 0.0 ? src->scale : 1.0;
+    l.x       = src->x;
+    l.y       = src->y;
+    l.img_w   = src->img_w;
+    l.img_h   = src->img_h;
+    if (src->kind == LAYER_DOODLE) {
+        store_deep_copy(&l.store, &src->store);
+    } else {
+        store_init(&l.store);
+        if (src->surface)
+            l.surface = cairo_surface_reference(src->surface);
+    }
+    return l;
 }
 
 DoodleDoc *doodle_doc_new(void) {
     DoodleDoc *d = g_new0(DoodleDoc, 1);
     d->layers = g_array_new(FALSE, FALSE, sizeof(Layer));
-    Layer dl = { 0 };
-    dl.kind = LAYER_DOODLE;
-    dl.visible = TRUE;
-    dl.name = g_strdup("涂鸦层");
-    store_init(&dl.store);
+    Layer dl = layer_new_doodle_value("涂鸦层");
     g_array_append_val(d->layers, dl);
     d->active_layer = 0;
+    return d;
+}
+
+DoodleDoc *doodle_doc_new_empty(void) {
+    DoodleDoc *d = g_new0(DoodleDoc, 1);
+    d->layers = g_array_new(FALSE, FALSE, sizeof(Layer));
+    d->active_layer = 0;  /* 调用者插入首层后再按需调整 */
     return d;
 }
 
@@ -433,8 +500,80 @@ void doc_insert_image_stub_below_active(DoodleDoc *doc) {
     img.kind    = LAYER_IMAGE_STUB;
     img.visible = TRUE;
     img.name    = g_strdup_printf("图片图层 %d", doc_layer_count(doc));
+    img.scale   = 1.0;
     g_array_insert_val(doc->layers, (guint)doc->active_layer, img);
     doc->active_layer++;
+}
+
+void doc_insert_image_layer_below_active(DoodleDoc *doc,
+                                          cairo_surface_t *surface,
+                                          const char *name) {
+    Layer img = layer_new_image_value(surface, name);
+    g_array_insert_val(doc->layers, (guint)doc->active_layer, img);
+    doc->active_layer++;
+}
+
+/* ─── 图层增删改查 ────────────────────────────────────── */
+
+void doc_insert_layer_at(DoodleDoc *doc, int pos, Layer src_value) {
+    int n = doc_layer_count(doc);
+    if (pos < 0)  pos = 0;
+    if (pos > n)  pos = n;
+    g_array_insert_val(doc->layers, (guint)pos, src_value);
+    if (pos <= doc->active_layer && doc->active_layer < n)
+        doc->active_layer++;
+    /* 后插入不影响 active。边界：原本 active=n-1、pos=n，active 不变 */
+}
+
+void doc_remove_layer(DoodleDoc *doc, int idx) {
+    int n = doc_layer_count(doc);
+    if (idx < 0 || idx >= n) return;
+    if (n <= 1) return; /* 保留至少一层 */
+    layer_clear(&g_array_index(doc->layers, Layer, idx));
+    g_array_remove_index(doc->layers, (guint)idx);
+    if (doc->active_layer > idx) doc->active_layer--;
+    if (doc->active_layer >= doc_layer_count(doc))
+        doc->active_layer = doc_layer_count(doc) - 1;
+    /* 若 active 指向非 doodle 层，尝试向上推一个 doodle 层 */
+    if (doc_active_layer(doc)->kind != LAYER_DOODLE) {
+        for (int i = doc_layer_count(doc) - 1; i >= 0; i--) {
+            Layer *L = &g_array_index(doc->layers, Layer, i);
+            if (L->kind == LAYER_DOODLE) { doc->active_layer = i; break; }
+        }
+    }
+}
+
+void doc_move_layer(DoodleDoc *doc, int from, int to) {
+    int n = doc_layer_count(doc);
+    if (from < 0 || from >= n) return;
+    if (to   < 0) to = 0;
+    if (to   >= n) to = n - 1;
+    if (from == to) return;
+    Layer tmp = g_array_index(doc->layers, Layer, from);
+    g_array_remove_index(doc->layers, (guint)from);
+    g_array_insert_val (doc->layers, (guint)to, tmp);
+    /* active 跟随调整 */
+    if (doc->active_layer == from)         doc->active_layer = to;
+    else if (from < doc->active_layer && doc->active_layer <= to)
+        doc->active_layer--;
+    else if (to <= doc->active_layer && doc->active_layer < from)
+        doc->active_layer++;
+}
+
+void doc_set_active_layer(DoodleDoc *doc, int idx) {
+    int n = doc_layer_count(doc);
+    if (idx < 0 || idx >= n) return;
+    Layer *L = &g_array_index(doc->layers, Layer, idx);
+    if (L->kind != LAYER_DOODLE) return; /* 仅允许 doodle 层 active */
+    doc->active_layer = idx;
+}
+
+Layer doc_clone_layer_value(const DoodleDoc *doc, int idx) {
+    Layer empty = { 0 };
+    int n = doc_layer_count(doc);
+    if (idx < 0 || idx >= n) return empty;
+    Layer *src = &g_array_index(doc->layers, Layer, idx);
+    return layer_clone_value(src);
 }
 
 gboolean shape_set_number(Shape *s, int new_n) {

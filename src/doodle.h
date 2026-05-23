@@ -56,7 +56,14 @@ typedef struct {
     LayerKind  kind;
     gboolean   visible;
     char      *name;
-    ShapeStore store;   /* 仅 LAYER_DOODLE 有效 */
+    ShapeStore store;            /* 仅 LAYER_DOODLE 有效 */
+
+    /* 仅 LAYER_IMAGE_STUB 有效；surface 为 NULL 时退化为占位 */
+    cairo_surface_t *surface;
+    double           img_w;      /* 原生像素宽  */
+    double           img_h;      /* 原生像素高  */
+    double           x, y;       /* 在画布上的偏移 */
+    double           scale;      /* 统一缩放；1.0 为原始尺寸 */
 } Layer;
 
 typedef struct {
@@ -73,6 +80,9 @@ void   shape_free(Shape *s);
 
 /* ─── 文档/编号 API ───────────────────────────────────────────── */
 DoodleDoc  *doodle_doc_new(void);
+/* 创建不包含任何图层的空文档，调用者需自行插入首层
+ * 并保证后续访问前 active_layer 进入合法范围。 */
+DoodleDoc  *doodle_doc_new_empty(void);
 void        doodle_doc_free(DoodleDoc *doc);
 Layer      *doc_active_layer(DoodleDoc *doc);
 ShapeStore *doc_active_store(DoodleDoc *doc);
@@ -106,8 +116,27 @@ void   doc_apply_array(DoodleDoc *doc,
 /* 一键整理：按当前 store 顺序把所有非阵列图形与阵列子项的编号重排为 1..N 紧凑序列。 */
 void   doc_compact_numbers(DoodleDoc *doc);
 
-/* 在当前 doodle 层下方插入图片占位层（仅骨架，不加载图片） */
-void   doc_insert_image_stub_below_active(DoodleDoc *doc);
+/* 在当前 doodle 层下方插入图片占位层（仅骨架，不加载图片）*/
+void doc_insert_image_stub_below_active(DoodleDoc *doc);
+
+/* 在当前 doodle 层下方插入携带 cairo_surface 的真实图片层；
+ * doc 接管 surface 引用 (cairo_surface_reference)。 */
+void doc_insert_image_layer_below_active(DoodleDoc *doc,
+                                          cairo_surface_t *surface,
+                                          const char *name);
+
+/* 图层辅助 API（按值在 GArray<Layer> 中维护） */
+Layer  layer_new_doodle_value(const char *name);
+Layer  layer_new_image_value (cairo_surface_t *surface, const char *name);
+Layer  layer_clone_value     (const Layer *src);
+void   layer_free_contents   (Layer *l);
+
+/* 文档：图层增删改查（以 Layer 值拷贝交付所有权） */
+void   doc_insert_layer_at(DoodleDoc *doc, int pos, Layer src_value);
+void   doc_remove_layer    (DoodleDoc *doc, int idx);
+void   doc_move_layer      (DoodleDoc *doc, int from, int to);
+void   doc_set_active_layer(DoodleDoc *doc, int idx);
+Layer  doc_clone_layer_value(const DoodleDoc *doc, int idx);
 
 /* 设置任意编号（允许产生空缺 / 重复，不自动整理）；<1 视为非法 */
 gboolean shape_set_number(Shape *s, int new_n);
@@ -160,5 +189,16 @@ void       doodle_canvas_cancel_array(GtkWidget *w);
 GtkWidget *doodle_window_new(void);  /* AdwApplicationWindow，未关联 GApplication */
 GtkWidget *doodle_view_new(void);    /* 仅 paned 内容区，便于嵌入主窗口 */
 DoodleDoc *doodle_view_get_doc(GtkWidget *view);
+
+/* 用外部提供的 DoodleDoc 构造涂鸦窗口；own_doc=FALSE 时调用方负责释放 doc。 */
+GtkWidget *doodle_window_new_for_doc(DoodleDoc *doc, gboolean own_doc);
+
+/* 画布：渲染选项与只读模式 */
+void       doodle_canvas_set_doodle_alpha(GtkWidget *w, double alpha);
+void       doodle_canvas_set_view_only   (GtkWidget *w, gboolean view_only);
+
+/* 通用纯渲染入口：在任意 cairo_t 上画出 doc 的图层叠加结果（不含交互覆层） */
+void       doodle_render_doc(cairo_t *cr, DoodleDoc *doc,
+                              double doodle_alpha, int width, int height);
 
 G_END_DECLS

@@ -7,9 +7,11 @@ project('notework', 'c',
 )
 
 # 依赖
-gtk4_dep = dependency('gtk4', version : '>=4.10')
-adw_dep  = dependency('libadwaita-1', version : '>=1.0')
-m_dep    = meson.get_compiler('c').find_library('m', required : false)
+gtk4_dep    = dependency('gtk4', version : '>=4.10')
+adw_dep     = dependency('libadwaita-1', version : '>=1.0')
+m_dep       = meson.get_compiler('c').find_library('m', required : false)
+# 相册模块用 poppler-glib 把 PDF 拆成 cairo_surface
+poppler_dep = dependency('poppler-glib', version : '>=21', required : true)
 
 # 引入 gnome 模块（用于编译 GResource）
 gnome = import('gnome')
@@ -46,5 +48,28 @@ executable('notework-doodle',
     doodle_resources,
   ],
   dependencies : [gtk4_dep, adw_dep, m_dep],
+  install : true,
+)
+
+# ─── 相册/多页编辑模块（独立可执行，便于独立调试；后续可与主程序集成）───
+album_resources = gnome.compile_resources(
+  'album-resources',
+  'src/album.gresource.xml',
+  source_dir : 'src',
+  c_name : 'album',
+)
+
+executable('notework-album',
+  sources : [
+    'src/album_main.c',
+    'src/album_window.c',
+    'src/album_model.c',
+    'src/album_importer.c',
+    'src/doodle_window.c',
+    'src/doodle_canvas.c',
+    'src/doodle_model.c',
+    album_resources,
+  ],
+  dependencies : [gtk4_dep, adw_dep, m_dep, poppler_dep],
   install : true,
 )

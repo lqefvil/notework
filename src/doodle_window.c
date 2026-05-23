@@ -15,6 +15,7 @@
 typedef struct {
     GtkBuilder *builder;
     DoodleDoc  *doc;
+    gboolean    own_doc;   /* FALSE 时释放窗口不销毁 doc */
     GtkWidget  *canvas;
 
     /* 引用面板控件 */
@@ -39,7 +40,7 @@ typedef struct {
 static void win_state_free(gpointer p) {
     WinState *s = p;
     if (s->builder) g_object_unref(s->builder);
-    if (s->doc)     doodle_doc_free(s->doc);
+    if (s->own_doc && s->doc) doodle_doc_free(s->doc);
     g_free(s);
 }
 
@@ -401,7 +402,17 @@ static GtkWidget *build_view_internal(WinState *win) {
 
 GtkWidget *doodle_window_new(void) {
     WinState *win = g_new0(WinState, 1);
-    win->doc = doodle_doc_new();
+    win->doc     = doodle_doc_new();
+    win->own_doc = TRUE;
+    GtkWidget *w = build_view_internal(win);
+    g_object_set_data_full(G_OBJECT(w), "doodle-win-state", win, win_state_free);
+    return w;
+}
+
+GtkWidget *doodle_window_new_for_doc(DoodleDoc *doc, gboolean own_doc) {
+    WinState *win = g_new0(WinState, 1);
+    win->doc     = doc ? doc : doodle_doc_new();
+    win->own_doc = doc ? own_doc : TRUE;
     GtkWidget *w = build_view_internal(win);
     g_object_set_data_full(G_OBJECT(w), "doodle-win-state", win, win_state_free);
     return w;
