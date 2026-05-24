@@ -7,6 +7,26 @@
  *   3) 把窗口与本 AdwApplication 关联并 present。
  */
 #include "doodle.h"
+#include <string.h>
+
+/* GTK4 中 GtkSpinButton 内嵌 GtkText 在多种焦点链路径下（popover autohide、
+ * widget 重建销毁、HeaderBar spin 失焦等）会输出一条诊断性警告：
+ *   "GtkText - did not receive a focus-out event."
+ * 该警告不影响功能，本过滤器仅静默这一条，其他警告与错误不受影响。 */
+static GLogWriterOutput log_writer_filter(GLogLevelFlags level,
+                                          const GLogField *fields,
+                                          gsize n_fields,
+                                          gpointer user_data) {
+    for (gsize i = 0; i < n_fields; i++) {
+        if (g_strcmp0(fields[i].key, "MESSAGE") == 0 &&
+            fields[i].value != NULL &&
+            strstr((const char *)fields[i].value,
+                   "did not receive a focus-out event") != NULL) {
+            return G_LOG_WRITER_HANDLED;
+        }
+    }
+    return g_log_writer_default(level, fields, n_fields, user_data);
+}
 
 static void install_app_css(void) {
     GtkCssProvider *css = gtk_css_provider_new();
@@ -32,6 +52,7 @@ static void on_activate(GApplication *app, gpointer user_data) {
 }
 
 int main(int argc, char *argv[]) {
+    g_log_set_writer_func(log_writer_filter, NULL, NULL);
     AdwApplication *app = adw_application_new(
         "com.github.notework.doodle", G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app, "startup",  G_CALLBACK(on_startup),  NULL);

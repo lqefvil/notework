@@ -25,6 +25,32 @@
         <!-- 顶部工具切换 -->
         <child type="top">
           <object class="AdwHeaderBar">
+            <!-- 左侧：视图缩放 -->
+            <child type="start">
+              <object class="GtkBox" id="zoom_box">
+                <property name="spacing">2</property>
+                <property name="css-classes">linked</property>
+                <child>
+                  <object class="GtkButton" id="zoom_out_btn">
+                    <property name="icon-name">zoom-out-symbolic</property>
+                    <property name="tooltip-text">缩小 (最小 25%)</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="zoom_reset_btn">
+                    <property name="label">100%</property>
+                    <property name="tooltip-text">点击重置缩放为 100%</property>
+                    <property name="width-request">64</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="zoom_in_btn">
+                    <property name="icon-name">zoom-in-symbolic</property>
+                    <property name="tooltip-text">放大 (最大 400%)</property>
+                  </object>
+                </child>
+              </object>
+            </child>
             <child type="end">
               <object class="GtkBox">
                 <property name="spacing">4</property>
@@ -55,6 +81,60 @@
                     <property name="label">擦除</property>
                     <property name="tooltip-text">擦除（手绘线/直线会按擦除位置自动断开为多段并重新编号；阵列会被展开为独立副本后参与擦除）</property>
                     <property name="group">tool_select_btn</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkToggleButton" id="tool_hl_btn">
+                    <property name="label">高亮</property>
+                    <property name="tooltip-text">沿已存在的直线/手绘路径绘制半透明高亮（拖动鼠标会自动吸附到最近路径）</property>
+                    <property name="group">tool_select_btn</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <child type="end">
+              <object class="GtkBox">
+                <property name="spacing">6</property>
+                <property name="margin-end">6</property>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">粗细</property>
+                    <property name="css-classes">dim-label</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSpinButton" id="hl_global_spin">
+                    <property name="tooltip-text">高亮全局默认粗细 (4–25 px)</property>
+                    <property name="adjustment">
+                      <object class="GtkAdjustment">
+                        <property name="lower">4</property>
+                        <property name="upper">25</property>
+                        <property name="step-increment">1</property>
+                        <property name="value">12</property>
+                      </object>
+                    </property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSpinButton" id="hl_local_spin">
+                    <property name="tooltip-text">当前选中高亮记录的粗细（先用「选择」工具点击某条高亮）</property>
+                    <property name="sensitive">false</property>
+                    <property name="adjustment">
+                      <object class="GtkAdjustment">
+                        <property name="lower">4</property>
+                        <property name="upper">25</property>
+                        <property name="step-increment">1</property>
+                        <property name="value">12</property>
+                      </object>
+                    </property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="hl_delete_btn">
+                    <property name="icon-name">edit-delete-symbolic</property>
+                    <property name="tooltip-text">删除当前选中的高亮记录</property>
+                    <property name="sensitive">false</property>
+                    <property name="css-classes">flat</property>
                   </object>
                 </child>
               </object>
@@ -95,6 +175,8 @@
                   <object class="GtkLabel" id="missing_label">
                     <property name="xalign">0</property>
                     <property name="wrap">true</property>
+                    <property name="wrap-mode">word-char</property>
+                    <property name="max-width-chars">26</property>
                     <property name="label">缺号: —</property>
                     <property name="css-classes">doodle-missing</property>
                   </object>

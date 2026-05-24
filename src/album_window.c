@@ -42,6 +42,7 @@ struct AlbumState {
     GtkWidget *apply_toggle;
 
     GtkWidget *doodle_btn;
+    GtkWidget *highlight_btn;
     GtkWidget *copy_layer_btn;
     GtkWidget *page_up_btn, *page_down_btn, *page_delete_btn;
     GtkWidget *layer_up_btn, *layer_down_btn,
@@ -399,6 +400,7 @@ static void refresh_buttons_sensitive(AlbumState *st) {
     int n = album_page_count(st->album);
     gboolean has = n > 0;
     gtk_widget_set_sensitive(st->doodle_btn,       has);
+    gtk_widget_set_sensitive(st->highlight_btn,    has);
     gtk_widget_set_sensitive(st->page_up_btn,      has && st->album->active > 0);
     gtk_widget_set_sensitive(st->page_down_btn,    has && st->album->active < n - 1);
     gtk_widget_set_sensitive(st->page_delete_btn,  has);
@@ -612,6 +614,15 @@ static void on_doodle_clicked(GtkButton *btn, gpointer data) {
                           ctx, (GClosureNotify)doodle_edit_ctx_free, 0);
     st->doodle_win = GTK_WINDOW(dwin);
     gtk_window_present(GTK_WINDOW(dwin));
+}
+
+/* 「高亮」按钮：复用涂鸦打开流程，随后默认切到高亮工具。 */
+static void on_highlight_clicked(GtkButton *btn, gpointer data) {
+    AlbumState *st = data;
+    on_doodle_clicked(btn, data);
+    if (st->doodle_win)
+        doodle_window_set_initial_tool(GTK_WIDGET(st->doodle_win),
+                                       TOOL_HIGHLIGHT);
 }
 
 static void on_page_up_clicked(GtkButton *b, gpointer data) {
@@ -867,6 +878,7 @@ GtkWidget *album_window_new(void) {
     st->selection_info_label = grab(b, "selection_info_label");
     st->apply_toggle    = grab(b, "apply_toggle");
     st->doodle_btn      = grab(b, "doodle_btn");
+    st->highlight_btn   = grab(b, "highlight_btn");
     st->copy_layer_btn  = grab(b, "copy_layer_btn");
     st->page_up_btn     = grab(b, "page_up_btn");
     st->page_down_btn   = grab(b, "page_down_btn");
@@ -901,6 +913,8 @@ GtkWidget *album_window_new(void) {
                      G_CALLBACK(on_import_pdf_clicked),   st);
     g_signal_connect(st->doodle_btn,       "clicked",
                      G_CALLBACK(on_doodle_clicked),       st);
+    g_signal_connect(st->highlight_btn,    "clicked",
+                     G_CALLBACK(on_highlight_clicked),    st);
     g_signal_connect(st->apply_toggle,     "toggled",
                      G_CALLBACK(on_apply_toggle),         st);
     g_signal_connect(st->copy_layer_btn,   "clicked",

@@ -139,11 +139,61 @@ static void store_remove_at(ShapeStore *st, gsize idx) {
 
 /* ─── 文档 ──────────────────────────────────────────────────────── */
 
+/* ─── 高亮记录 ────────────────────────────────────────────────────────── */
+
+HighlightRecord *highlight_record_new(int host_layer_idx,
+                                       int host_shape_number,
+                                       double width) {
+    HighlightRecord *r = g_new0(HighlightRecord, 1);
+    r->host_layer_idx    = host_layer_idx;
+    r->host_shape_number = host_shape_number;
+    r->width             = width;
+    r->cap               = 16;
+    r->n                 = 0;
+    r->pt                = g_new(DPoint, r->cap);
+    return r;
+}
+
+void highlight_record_add_point(HighlightRecord *r, DPoint p) {
+    if (r->n == r->cap) {
+        r->cap *= 2;
+        r->pt = g_renew(DPoint, r->pt, r->cap);
+    }
+    r->pt[r->n++] = p;
+}
+
+void highlight_record_free(HighlightRecord *r) {
+    if (!r) return;
+    g_free(r->pt);
+    g_free(r);
+}
+
+HighlightRecord *highlight_record_clone(const HighlightRecord *src) {
+    HighlightRecord *c = g_new0(HighlightRecord, 1);
+    c->host_layer_idx    = src->host_layer_idx;
+    c->host_shape_number = src->host_shape_number;
+    c->width             = src->width;
+    c->n                 = src->n;
+    c->cap               = src->n > 0 ? src->n : 1;
+    c->pt                = g_new(DPoint, c->cap);
+    if (src->n > 0)
+        memcpy(c->pt, src->pt, sizeof(DPoint) * src->n);
+    return c;
+}
+
+/* ─── 文档 ─────────────────────────────────────────────────────────────────────── */
+
 static void layer_clear(Layer *l) {
     if (l->kind == LAYER_DOODLE) store_clear(&l->store);
     if (l->surface) {
         cairo_surface_destroy(l->surface);
         l->surface = NULL;
+    }
+    if (l->highlights) {
+        for (guint i = 0; i < l->highlights->len; i++)
+            highlight_record_free(g_ptr_array_index(l->highlights, i));
+        g_ptr_array_free(l->highlights, TRUE);
+        l->highlights = NULL;
     }
     g_free(l->name);
     l->name = NULL;
@@ -179,6 +229,17 @@ Layer layer_new_image_value(cairo_surface_t *surface, const char *name) {
     return l;
 }
 
+Layer layer_new_highlight_value(const char *name) {
+    Layer l = { 0 };
+    l.kind       = LAYER_HIGHLIGHT;
+    l.visible    = TRUE;
+    l.name       = g_strdup(name ? name : "高亮层");
+    store_init(&l.store);
+    l.scale      = 1.0;
+    l.highlights = g_ptr_array_new();
+    return l;
+}
+
 /* 深拷贝 ShapeStore */
 static void store_deep_copy(ShapeStore *dst, const ShapeStore *src) {
     store_init(dst);
@@ -200,6 +261,15 @@ Layer layer_clone_value(const Layer *src) {
     l.img_h   = src->img_h;
     if (src->kind == LAYER_DOODLE) {
         store_deep_copy(&l.store, &src->store);
+    } else if (src->kind == LAYER_HIGHLIGHT) {
+        store_init(&l.store);
+        l.highlights = g_ptr_array_new();
+        if (src->highlights) {
+            for (guint i = 0; i < src->highlights->len; i++) {
+                HighlightRecord *r = g_ptr_array_index(src->highlights, i);
+                g_ptr_array_add(l.highlights, highlight_record_clone(r));
+            }
+        }
     } else {
         store_init(&l.store);
         if (src->surface)
@@ -244,6 +314,37 @@ ShapeStore *doc_active_store(DoodleDoc *doc) {
 
 int doc_layer_count(const DoodleDoc *doc) {
     return (int)doc->layers->len;
+}
+
+/* 查找最顶的 LAYER_HIGHLIGHT，不存在返回 -1 */
+int doc_find_top_highlight_layer(const DoodleDoc *doc) {
+    int n = doc_layer_count(doc);
+    for (int i = n - 1; i >= 0; i--) {
+        Layer *L = &g_array_index(doc->layers, Layer, i);
+        if (L->kind == LAYER_HIGHLIGHT) return i;
+    }
+    return -1;
+}
+
+/* 查找最顶的 LAYER_DOODLE，不存在返回 -1 */
+int doc_find_top_doodle_layer(const DoodleDoc *doc) {
+    int n = doc_layer_count(doc);
+    for (int i = n - 1; i >= 0; i--) {
+        Layer *L = &g_array_index(doc->layers, Layer, i);
+        if (L->kind == LAYER_DOODLE) return i;
+    }
+    return -1;
+}
+
+/* 确保高亮层存在：不存在则在最顶追加一个。返回其下标。 */
+int doc_ensure_top_highlight_layer(DoodleDoc *doc) {
+    int idx = doc_find_top_highlight_layer(doc);
+    if (idx >= 0) return idx;
+    Layer hl = layer_new_highlight_value("高亮");
+    int pos = doc_layer_count(doc);   /* 附加到最顶 */
+    g_array_append_val(doc->layers, hl);
+    /* active_layer 不变；高亮层不可 active（active 仅限 LAYER_DOODLE） */
+    return pos;
 }
 
 /* ─── 编号管理 ──────────────────────────────────────────────────── */

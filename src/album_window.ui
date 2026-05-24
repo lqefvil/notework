@@ -61,6 +61,12 @@
                   </object>
                 </child>
                 <child>
+                  <object class="GtkButton" id="highlight_btn">
+                    <property name="label">高亮</property>
+                    <property name="tooltip-text">弹出涂鸦窗口并默认进入高亮工具（沿已有路径绘制半透明轨道）</property>
+                  </object>
+                </child>
+                <child>
                   <object class="GtkButton" id="copy_layer_btn">
                     <property name="label">复制图层…</property>
                     <property name="tooltip-text">把当前选中的图层批量复制到其他页</property>

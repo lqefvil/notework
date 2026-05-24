@@ -49,8 +49,21 @@ typedef struct {
 
 typedef enum {
     LAYER_DOODLE,
-    LAYER_IMAGE_STUB
+    LAYER_IMAGE_STUB,
+    LAYER_HIGHLIGHT             /* 高亮层；仅吸附在 LINE/PATH 上，置顶渲染 */
 } LayerKind;
+
+/* 单条高亮记录：沿宿主路径吸附后采样得到的连续点列。
+ * host_layer_idx 指向同一 doc 中的某个 LAYER_DOODLE 层；
+ * host_shape_number 是该层中宿主图形（LINE 或 PATH）的稳定全局编号。
+ * 整条记录共用一个 width。 */
+typedef struct {
+    int     host_layer_idx;
+    int     host_shape_number;
+    double  width;
+    DPoint *pt;
+    gsize   n, cap;
+} HighlightRecord;
 
 typedef struct {
     LayerKind  kind;
@@ -64,6 +77,9 @@ typedef struct {
     double           img_h;      /* 原生像素高  */
     double           x, y;       /* 在画布上的偏移 */
     double           scale;      /* 统一缩放；1.0 为原始尺寸 */
+
+    /* 仅 LAYER_HIGHLIGHT 有效；元素为 HighlightRecord*（堆分配） */
+    GPtrArray *highlights;
 } Layer;
 
 typedef struct {
@@ -128,8 +144,23 @@ void doc_insert_image_layer_below_active(DoodleDoc *doc,
 /* 图层辅助 API（按值在 GArray<Layer> 中维护） */
 Layer  layer_new_doodle_value(const char *name);
 Layer  layer_new_image_value (cairo_surface_t *surface, const char *name);
+Layer  layer_new_highlight_value(const char *name);
 Layer  layer_clone_value     (const Layer *src);
 void   layer_free_contents   (Layer *l);
+
+/* HighlightRecord 构造/释放/采样 */
+HighlightRecord *highlight_record_new(int host_layer_idx,
+                                       int host_shape_number,
+                                       double width);
+void             highlight_record_add_point(HighlightRecord *r, DPoint p);
+void             highlight_record_free(HighlightRecord *r);
+HighlightRecord *highlight_record_clone(const HighlightRecord *src);
+
+/* 在 doc 中查找/确保高亮层存在；返回其在 doc->layers 中的下标。
+ * doc_ensure_top_highlight_layer 若不存在会在最顶端追加一个新的高亮层。 */
+int  doc_find_top_highlight_layer (const DoodleDoc *doc);
+int  doc_ensure_top_highlight_layer(DoodleDoc *doc);
+int  doc_find_top_doodle_layer    (const DoodleDoc *doc);
 
 /* 文档：图层增删改查（以 Layer 值拷贝交付所有权） */
 void   doc_insert_layer_at(DoodleDoc *doc, int pos, Layer src_value);
@@ -152,7 +183,8 @@ typedef enum {
     TOOL_LINE,
     TOOL_PATH,
     TOOL_ERASE,
-    TOOL_SELECT
+    TOOL_SELECT,
+    TOOL_HIGHLIGHT
 } Tool;
 
 typedef void (*DoodleChangedFn)(GtkWidget *canvas, gpointer user_data);
@@ -196,6 +228,35 @@ GtkWidget *doodle_window_new_for_doc(DoodleDoc *doc, gboolean own_doc);
 /* 画布：渲染选项与只读模式 */
 void       doodle_canvas_set_doodle_alpha(GtkWidget *w, double alpha);
 void       doodle_canvas_set_view_only   (GtkWidget *w, gboolean view_only);
+
+/* 画布：视图缩放（仅影响画布渲染，不修改文档数据）。
+ * 范围 0.25 – 4.0，默认 1.0；set 会自动 clamp。 */
+#define DOODLE_VIEW_SCALE_MIN 0.25
+#define DOODLE_VIEW_SCALE_MAX 4.00
+#define DOODLE_VIEW_SCALE_DEF 1.00
+void       doodle_canvas_set_view_scale(GtkWidget *w, double scale);
+double     doodle_canvas_get_view_scale(GtkWidget *w);
+
+/* ─── 高亮：全局/局部 width 与选中状态 ───────────────────────────── */
+/* 默认 12px，范围 4–25px。设置时会自动 clamp。 */
+void       doodle_canvas_set_global_highlight_width(GtkWidget *w, double width);
+double     doodle_canvas_get_global_highlight_width(GtkWidget *w);
+
+/* 选中高亮记录：layer_idx 应为 LAYER_HIGHLIGHT 层下标；rec_idx 为其内部下标。
+ * 任一参数 <0 表示清除选中。 */
+void       doodle_canvas_set_selected_highlight(GtkWidget *w,
+                                                int layer_idx, int rec_idx);
+void       doodle_canvas_get_selected_highlight(GtkWidget *w,
+                                                int *layer_idx, int *rec_idx);
+/* 调整当前选中高亮记录的 width；未选中时无效 */
+void       doodle_canvas_set_selected_highlight_width(GtkWidget *w, double width);
+
+/* 删除当前选中的高亮记录；未选中时无效。
+ * 删除后会自动清除高亮选中状态并触发 changed_cb。 */
+void       doodle_canvas_delete_selected_highlight(GtkWidget *w);
+
+/* 设置画布初始工具（doodle_window 创建时由调用方触发，例如 album → 高亮） */
+void       doodle_window_set_initial_tool(GtkWidget *win, Tool t);
 
 /* 通用纯渲染入口：在任意 cairo_t 上画出 doc 的图层叠加结果（不含交互覆层） */
 void       doodle_render_doc(cairo_t *cr, DoodleDoc *doc,

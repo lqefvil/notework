@@ -16,6 +16,17 @@
 #define HIT_THRESH            8.0
 #define MIN_LINE_LEN          3.0
 
+/* 高亮参数：默认 12px，范围 [4, 25]。 */
+#define HIGHLIGHT_WIDTH_MIN    4.0
+#define HIGHLIGHT_WIDTH_MAX   25.0
+#define HIGHLIGHT_WIDTH_DEF   12.0
+/* 路径吸附最大距离（超过该距离丢弃采样点） */
+#define HIGHLIGHT_SNAP_RADIUS 60.0
+/* 高亮采样点间最小间距 */
+#define HIGHLIGHT_SAMPLE_MIN   2.0
+/* 高亮记录选中命中阈值（用户可点击高亮点附近选中） */
+#define HIGHLIGHT_HIT_EXTRA    4.0
+
 typedef struct { int idx; double dx0, dy0; } SelOrig;
 
 typedef struct {
@@ -48,6 +59,14 @@ typedef struct {
     gboolean has_pointer;
     DPoint   pointer_pos;
 
+    /* 高亮工具状态 */
+    double           hl_global_width;          /* 全局默认 width */
+    gboolean         hl_drawing;
+    HighlightRecord *hl_pending;                /* 当前正在采样的记录（未提交） */
+    int              hl_last_seg;               /* pending 期上次投影到的 PATH 段下标；锁段防脱轨，-1 表示未锁 */
+    int              hl_sel_layer;              /* 选中高亮记录的图层下标；-1 为无 */
+    int              hl_sel_rec;                /* 选中高亮记录在层内的下标；-1 为无 */
+
     /* 变更回调 */
     DoodleChangedFn changed_cb;
     gpointer        changed_data;
@@ -55,6 +74,7 @@ typedef struct {
     /* 渲染开关 */
     double   doodle_alpha;     /* 默认 1.0；album 预览调用使用 0.25 */
     gboolean view_only;        /* TRUE 时忽略所有输入交互 */
+    double   view_scale;       /* 视图缩放：默认 1.0，范围 0.25 – 4.0 */
 } CanvasCtx;
 
 #define CTX_KEY "doodle-canvas-ctx"
@@ -66,6 +86,7 @@ static CanvasCtx *ctx_of(GtkWidget *w) {
 static void ctx_free(gpointer p) {
     CanvasCtx *c = p;
     if (c->path_pending) shape_free(c->path_pending);
+    if (c->hl_pending)   highlight_record_free(c->hl_pending);
     if (c->selected_extra)    g_array_free(c->selected_extra, TRUE);
     if (c->sel_origs)         g_array_free(c->sel_origs, TRUE);
     if (c->array_preview_idx) g_array_free(c->array_preview_idx, TRUE);
@@ -190,6 +211,215 @@ static void shape_local_bbox(const Shape *s,
         *y1 = by1 + (s->u.arr.rows - 1) * s->u.arr.gap_y;
         break;
     }
+    }
+}
+
+/* ─── 高亮：吸附与查找 ────────────────────────────────────────── */
+
+/* 把点 (px,py) 投影到线段 AB，返回投影点 (qx,qy) 与距离。 */
+static double project_pt_seg(double px, double py,
+                              double ax, double ay,
+                              double bx, double by,
+                              double *qx, double *qy) {
+    double vx = bx - ax, vy = by - ay;
+    double wx = px - ax, wy = py - ay;
+    double c2 = vx * vx + vy * vy;
+    double t  = (c2 > 0) ? (vx * wx + vy * wy) / c2 : 0.0;
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    double tx = ax + t * vx, ty = ay + t * vy;
+    if (qx) *qx = tx;
+    if (qy) *qy = ty;
+    return hypot(px - tx, py - ty);
+}
+
+/* 把 (px,py) 投影到带偏移的 LINE/PATH 宿主上，返回最小距离与对应投影点。
+ * hint_seg: PATH 段提示（-1 表示无，全局搜）； out_seg: 本次选中的段下标。
+ * 当 hint_seg 有效时，仅在 [hint-W, hint+W] 范围内搜索，防止在大弧度曲线上跨段跨跳。 */
+static double dist_pt_to_host_seg(const Shape *s, double px, double py,
+                                  int hint_seg,
+                                  double *qx, double *qy, int *out_seg) {
+    if (s->kind == SHAPE_LINE) {
+        if (out_seg) *out_seg = 0;
+        return project_pt_seg(px, py,
+            s->u.line.a.x + s->dx, s->u.line.a.y + s->dy,
+            s->u.line.b.x + s->dx, s->u.line.b.y + s->dy,
+            qx, qy);
+    } else if (s->kind == SHAPE_PATH) {
+        if (s->u.path.n < 2) return 1e18;
+        int n_seg = (int)s->u.path.n - 1;
+        int lo = 0, hi = n_seg - 1;
+        if (hint_seg >= 0 && hint_seg < n_seg) {
+            const int W = 2; /* 锁段窗口：上次段 ± W 段 */
+            lo = hint_seg - W; if (lo < 0) lo = 0;
+            hi = hint_seg + W; if (hi >= n_seg) hi = n_seg - 1;
+        }
+        double bestd = 1e18, bx = 0, by = 0;
+        int best_seg = (hint_seg >= 0) ? hint_seg : 0;
+        for (int i = lo; i <= hi; i++) {
+            double tx, ty;
+            double d = project_pt_seg(px, py,
+                s->u.path.pt[i  ].x + s->dx, s->u.path.pt[i  ].y + s->dy,
+                s->u.path.pt[i+1].x + s->dx, s->u.path.pt[i+1].y + s->dy,
+                &tx, &ty);
+            if (d < bestd) { bestd = d; bx = tx; by = ty; best_seg = i; }
+        }
+        if (qx) *qx = bx;
+        if (qy) *qy = by;
+        if (out_seg) *out_seg = best_seg;
+        return bestd;
+    }
+    return 1e18;
+}
+
+/* 把 (px,py) 投影到带偏移的 LINE/PATH 宿主上（全局搜）。 */
+static double dist_pt_to_host(const Shape *s, double px, double py,
+                              double *qx, double *qy) {
+    return dist_pt_to_host_seg(s, px, py, -1, qx, qy, NULL);
+}
+
+/* 在所有可见的 LAYER_DOODLE 中找最近的 LINE/PATH 宿主。 */
+static double find_snap_host(DoodleDoc *doc, double px, double py,
+                              int *out_layer_idx, int *out_shape_number,
+                              double *out_qx, double *out_qy) {
+    double bestd = 1e18;
+    int bli = -1, bnum = -1;
+    double bqx = 0, bqy = 0;
+    int n = doc_layer_count(doc);
+    for (int li = 0; li < n; li++) {
+        Layer *L = &g_array_index(doc->layers, Layer, li);
+        if (!L->visible || L->kind != LAYER_DOODLE) continue;
+        ShapeStore *st = &L->store;
+        for (gsize i = 0; i < st->n; i++) {
+            Shape *s = st->items[i];
+            if (s->kind != SHAPE_LINE && s->kind != SHAPE_PATH) continue;
+            double tx, ty;
+            double d = dist_pt_to_host(s, px, py, &tx, &ty);
+            if (d < bestd) {
+                bestd = d; bli = li; bnum = s->number;
+                bqx = tx; bqy = ty;
+            }
+        }
+    }
+    if (out_layer_idx)    *out_layer_idx = bli;
+    if (out_shape_number) *out_shape_number = bnum;
+    if (out_qx) *out_qx = bqx;
+    if (out_qy) *out_qy = bqy;
+    return bestd;
+}
+
+/* 给定锁定的宿主标识，把鼠标位置投影到该宿主上。失败返回 FALSE。
+ * seg_io: 可传 NULL；非 NULL 时作为 in/out 段提示，锁段防高亮脱轨。 */
+static gboolean project_to_host(DoodleDoc *doc,
+                                int host_layer_idx, int host_shape_number,
+                                double px, double py,
+                                double *qx, double *qy,
+                                int *seg_io) {
+    if (host_layer_idx < 0 || host_layer_idx >= doc_layer_count(doc))
+        return FALSE;
+    Layer *L = &g_array_index(doc->layers, Layer, host_layer_idx);
+    if (L->kind != LAYER_DOODLE) return FALSE;
+    ShapeStore *st = &L->store;
+    for (gsize i = 0; i < st->n; i++) {
+        Shape *s = st->items[i];
+        if (s->number != host_shape_number) continue;
+        if (s->kind != SHAPE_LINE && s->kind != SHAPE_PATH) return FALSE;
+        int hint = (seg_io ? *seg_io : -1);
+        int out_seg = -1;
+        dist_pt_to_host_seg(s, px, py, hint, qx, qy, &out_seg);
+        if (seg_io) *seg_io = out_seg;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* 高亮记录命中（点击选中）：在所有可见 LAYER_HIGHLIGHT 中按顶层优先查找。 */
+static gboolean hl_hit_test(DoodleDoc *doc, double px, double py,
+                            int *out_li, int *out_ri) {
+    int n = doc_layer_count(doc);
+    for (int li = n - 1; li >= 0; li--) {
+        Layer *L = &g_array_index(doc->layers, Layer, li);
+        if (!L->visible || L->kind != LAYER_HIGHLIGHT || !L->highlights)
+            continue;
+        for (gssize ri = (gssize)L->highlights->len - 1; ri >= 0; ri--) {
+            HighlightRecord *r = g_ptr_array_index(L->highlights, ri);
+            if (!r || r->n < 2) continue;
+            double bestd = 1e18;
+            for (gsize i = 1; i < r->n; i++) {
+                double d = dist_pt_seg(px, py,
+                    r->pt[i-1].x, r->pt[i-1].y,
+                    r->pt[i  ].x, r->pt[i  ].y);
+                if (d < bestd) bestd = d;
+            }
+            if (bestd <= r->width * 0.5 + HIGHLIGHT_HIT_EXTRA) {
+                if (out_li) *out_li = li;
+                if (out_ri) *out_ri = (int)ri;
+                return TRUE;
+            }
+        }
+    }
+    return FALSE;
+}
+
+/* 提交当前 hl_pending 到顶层高亮层（不足 2 点直接丢弃）。 */
+static void hl_commit_pending(CanvasCtx *c) {
+    if (!c->hl_pending) return;
+    if (c->hl_pending->n < 2) {
+        highlight_record_free(c->hl_pending);
+        c->hl_pending = NULL;
+        return;
+    }
+    int li = doc_ensure_top_highlight_layer(c->doc);
+    Layer *L = &g_array_index(c->doc->layers, Layer, li);
+    g_ptr_array_add(L->highlights, c->hl_pending);
+    c->hl_pending = NULL;
+}
+
+/* 在 cr 上绘制 doc 的所有 LAYER_HIGHLIGHT 记录（含可选的 pending 预览与选中描边）。 */
+static void render_highlight_layers(cairo_t *cr, DoodleDoc *doc,
+                                    int sel_layer, int sel_rec,
+                                    HighlightRecord *pending) {
+    int n = doc_layer_count(doc);
+    for (int li = 0; li < n; li++) {
+        Layer *L = &g_array_index(doc->layers, Layer, li);
+        if (!L->visible || L->kind != LAYER_HIGHLIGHT || !L->highlights)
+            continue;
+        for (guint k = 0; k < L->highlights->len; k++) {
+            HighlightRecord *r = g_ptr_array_index(L->highlights, k);
+            if (!r || r->n < 2) continue;
+            cairo_save(cr);
+            cairo_set_source_rgba(cr, 1.0, 0.922, 0.231, 0.45);
+            cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
+            cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+            cairo_set_line_width(cr, r->width);
+            cairo_move_to(cr, r->pt[0].x, r->pt[0].y);
+            for (gsize i = 1; i < r->n; i++)
+                cairo_line_to(cr, r->pt[i].x, r->pt[i].y);
+            cairo_stroke(cr);
+            if (li == sel_layer && (int)k == sel_rec) {
+                double dashes[] = { 4.0, 3.0 };
+                cairo_set_source_rgba(cr, 0.13, 0.45, 0.85, 0.85);
+                cairo_set_line_width(cr, 1.5);
+                cairo_set_dash(cr, dashes, 2, 0);
+                cairo_move_to(cr, r->pt[0].x, r->pt[0].y);
+                for (gsize i = 1; i < r->n; i++)
+                    cairo_line_to(cr, r->pt[i].x, r->pt[i].y);
+                cairo_stroke(cr);
+            }
+            cairo_restore(cr);
+        }
+    }
+    if (pending && pending->n >= 2) {
+        cairo_save(cr);
+        cairo_set_source_rgba(cr, 1.0, 0.922, 0.231, 0.55);
+        cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
+        cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+        cairo_set_line_width(cr, pending->width);
+        cairo_move_to(cr, pending->pt[0].x, pending->pt[0].y);
+        for (gsize i = 1; i < pending->n; i++)
+            cairo_line_to(cr, pending->pt[i].x, pending->pt[i].y);
+        cairo_stroke(cr);
+        cairo_restore(cr);
     }
 }
 
@@ -355,6 +585,8 @@ static void render_doc_layers(cairo_t *cr, DoodleDoc *doc,
         cairo_paint_with_alpha(cr, doodle_alpha);
         cairo_restore(cr);
     }
+    /* 高亮层置顶（不绘制 pending，因为这是纯渲染入口） */
+    render_highlight_layers(cr, doc, -1, -1, NULL);
 }
 
 void doodle_render_doc(cairo_t *cr, DoodleDoc *doc,
@@ -384,6 +616,15 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr,
     cairo_stroke(cr);
 
     if (!c->doc) return;
+
+    /* 视图缩放：以 (0,0) 为基准缩放整个文档坐标系。
+     * 后续 width/height 需要转换为文档坐标 doc_w/doc_h 使用。 */
+    double scale = (c->view_scale > 0.0) ? c->view_scale : 1.0;
+    cairo_save(cr);
+    if (scale != 1.0) cairo_scale(cr, scale, scale);
+    int doc_w = (int)(width  / scale);
+    int doc_h = (int)(height / scale);
+    (void)doc_h;
 
     /* 阵列预览期隐藏选中的基准图形（仅 active doodle 层生效）
      * 这里仍复用原逻辑，skip 仅在 active 层发生。
@@ -454,6 +695,11 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr,
         cairo_restore(cr);
     }
 
+    /* 高亮层置顶绘制（含正在采样的 pending 预览） */
+    render_highlight_layers(cr, c->doc,
+                            c->hl_sel_layer, c->hl_sel_rec,
+                            c->hl_pending);
+
     /* 直线橡皮筋（含过起点的水平参考线） */
     if (c->drawing_line) {
         /* 水平参考线：横贯画布的细虚线，走过起点 y */
@@ -463,7 +709,7 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr,
         cairo_set_line_width(cr, 1.0);
         cairo_set_dash(cr, href_dashes, 2, 0);
         cairo_move_to(cr, 0,     c->line_start.y);
-        cairo_line_to(cr, width, c->line_start.y);
+        cairo_line_to(cr, doc_w, c->line_start.y);
         cairo_stroke(cr);
         cairo_restore(cr);
 
@@ -526,6 +772,9 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr,
         cairo_fill(cr);
         cairo_restore(cr);
     }
+
+    /* 视图缩放：恢复 cairo 状态 */
+    cairo_restore(cr);
 }
 
 /* ─── 命中测试 ────────────────────────────────────────────────── */
@@ -703,6 +952,10 @@ static void on_drag_begin(GtkGestureDrag *g, double sx, double sy,
     if (!c->doc) return;
     if (c->view_only) return;
 
+    /* widget 像素坐标 → 文档坐标（遵循当前视图缩放） */
+    double scale = (c->view_scale > 0.0) ? c->view_scale : 1.0;
+    sx /= scale; sy /= scale;
+
     if (c->array_active) {
         c->ar_drag_orig_dx = c->ar_dx;
         c->ar_drag_orig_dy = c->ar_dy;
@@ -724,11 +977,69 @@ static void on_drag_begin(GtkGestureDrag *g, double sx, double sy,
         erase_at(c, sx, sy);
         notify_changed(c);
         break;
+    case TOOL_HIGHLIGHT: {
+        /* 优先选中已有高亮记录：点击命中某条高亮时不启动绘制，
+         * 转为“选中它”，便于调节粗细 / 删除。
+         * 这样在高亮压在路径上时，高亮工具中点击也能轻松选中高亮。 */
+        {
+            int hl_li = -1, hl_ri = -1;
+            if (hl_hit_test(c->doc, sx, sy, &hl_li, &hl_ri)) {
+                c->hl_sel_layer = hl_li;
+                c->hl_sel_rec   = hl_ri;
+                c->hl_drawing   = FALSE;
+                if (c->hl_pending) {
+                    highlight_record_free(c->hl_pending);
+                    c->hl_pending = NULL;
+                }
+                notify_changed(c);
+                gtk_widget_queue_draw(c->area);
+                break;
+            }
+        }
+        int hl, hnum;
+        double qx, qy;
+        double d = find_snap_host(c->doc, sx, sy, &hl, &hnum, &qx, &qy);
+        if (d > HIGHLIGHT_SNAP_RADIUS || hl < 0) {
+            c->hl_drawing = FALSE;
+            break;
+        }
+        if (c->hl_pending) highlight_record_free(c->hl_pending);
+        c->hl_pending = highlight_record_new(hl, hnum, c->hl_global_width);
+        highlight_record_add_point(c->hl_pending, (DPoint){ qx, qy });
+        c->hl_drawing = TRUE;
+        /* 锁段：以 begin 点为起点，让第一次 update 以 -1 全局锁段；
+         * 这里主动调一次 project_to_host 让 hl_last_seg 马上锁住。 */
+        c->hl_last_seg = -1;
+        {
+            double tqx, tqy; int dummy_seg = -1;
+            if (project_to_host(c->doc, hl, hnum, sx, sy,
+                                &tqx, &tqy, &dummy_seg)) {
+                c->hl_last_seg = dummy_seg;
+            }
+        }
+        gtk_widget_queue_draw(c->area);
+        break;
+    }
     case TOOL_SELECT: {
         GdkModifierType mstate = gtk_event_controller_get_current_event_state(
             GTK_EVENT_CONTROLLER(g));
         gboolean ctrl = (mstate & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) != 0;
         int hit = hit_test(c, sx, sy, HIT_THRESH);
+        /* 如果未命中底层图形，尝试命中顶层高亮记录 */
+        if (hit < 0 && !ctrl) {
+            int hl_li = -1, hl_ri = -1;
+            if (hl_hit_test(c->doc, sx, sy, &hl_li, &hl_ri)) {
+                c->hl_sel_layer = hl_li;
+                c->hl_sel_rec   = hl_ri;
+                selection_clear(c);
+                c->drag_moving = FALSE;
+                notify_changed(c);
+                break;
+            }
+            /* 未命中高亮：清除高亮选中 */
+            c->hl_sel_layer = -1;
+            c->hl_sel_rec   = -1;
+        }
         if (ctrl) {
             if (hit >= 0) selection_toggle(c, hit);
             c->drag_moving = FALSE;
@@ -773,8 +1084,11 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
     if (!c->doc) return;
     if (c->view_only) return;
 
+    double scale = (c->view_scale > 0.0) ? c->view_scale : 1.0;
     double sx, sy;
     gtk_gesture_drag_get_start_point(g, &sx, &sy);
+    sx /= scale; sy /= scale;
+    ox /= scale; oy /= scale;
     double cx = sx + ox, cy = sy + oy;
 
     if (c->array_active) {
@@ -805,6 +1119,24 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
         erase_at(c, cx, cy);
         notify_changed(c);
         break;
+    case TOOL_HIGHLIGHT:
+        if (c->hl_drawing && c->hl_pending) {
+            double qx, qy;
+            if (!project_to_host(c->doc,
+                                 c->hl_pending->host_layer_idx,
+                                 c->hl_pending->host_shape_number,
+                                 cx, cy, &qx, &qy,
+                                 &c->hl_last_seg)) {
+                /* 宿主丢失 (如被擦除)：结束采样 */
+                break;
+            }
+            DPoint last = c->hl_pending->pt[c->hl_pending->n - 1];
+            if (hypot(qx - last.x, qy - last.y) >= HIGHLIGHT_SAMPLE_MIN) {
+                highlight_record_add_point(c->hl_pending, (DPoint){ qx, qy });
+                gtk_widget_queue_draw(c->area);
+            }
+        }
+        break;
     case TOOL_SELECT:
         if (c->drag_moving && c->sel_origs->len > 0) {
             ShapeStore *st = doc_active_store(c->doc);
@@ -828,8 +1160,11 @@ static void on_drag_end(GtkGestureDrag *g, double ox, double oy,
     if (!c->doc) return;
     if (c->view_only) return;
 
+    double scale = (c->view_scale > 0.0) ? c->view_scale : 1.0;
     double sx, sy;
     gtk_gesture_drag_get_start_point(g, &sx, &sy);
+    sx /= scale; sy /= scale;
+    ox /= scale; oy /= scale;
     double cx = sx + ox, cy = sy + oy;
 
     if (c->array_active) return;
@@ -864,6 +1199,14 @@ static void on_drag_end(GtkGestureDrag *g, double ox, double oy,
     case TOOL_ERASE:
         notify_changed(c);
         break;
+    case TOOL_HIGHLIGHT:
+        if (c->hl_drawing) {
+            c->hl_drawing = FALSE;
+            hl_commit_pending(c);
+            notify_changed(c);
+        }
+        (void)ox; (void)oy; (void)cx; (void)cy;
+        break;
     case TOOL_SELECT:
         c->drag_moving = FALSE;
         g_array_set_size(c->sel_origs, 0);
@@ -878,8 +1221,9 @@ static void on_motion(GtkEventControllerMotion *m,
                       double x, double y, gpointer data) {
     (void)m;
     CanvasCtx *c = data;
+    double scale = (c->view_scale > 0.0) ? c->view_scale : 1.0;
     c->has_pointer = TRUE;
-    c->pointer_pos.x = x; c->pointer_pos.y = y;
+    c->pointer_pos.x = x / scale; c->pointer_pos.y = y / scale;
     if (c->tool == TOOL_ERASE) gtk_widget_queue_draw(c->area);
 }
 
@@ -913,6 +1257,13 @@ GtkWidget *doodle_canvas_new(DoodleDoc *doc) {
     c->ar_gap_y          = 60;
     c->doodle_alpha      = 1.0;
     c->view_only         = FALSE;
+    c->view_scale        = DOODLE_VIEW_SCALE_DEF;
+    c->hl_global_width   = HIGHLIGHT_WIDTH_DEF;
+    c->hl_drawing        = FALSE;
+    c->hl_pending        = NULL;
+    c->hl_last_seg       = -1;
+    c->hl_sel_layer      = -1;
+    c->hl_sel_rec        = -1;
     g_object_set_data_full(G_OBJECT(area), CTX_KEY, c, ctx_free);
 
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(area), on_draw, c, NULL);
@@ -943,6 +1294,16 @@ void doodle_canvas_set_tool(GtkWidget *w, Tool t) {
     if (c->path_pending) { shape_free(c->path_pending); c->path_pending = NULL; }
     c->drag_moving = FALSE;
     g_array_set_size(c->sel_origs, 0);
+    /* 高亮工具下未提交的 pending 丢弃；离开高亮工具同时清除高亮选中 */
+    if (c->hl_pending) {
+        highlight_record_free(c->hl_pending);
+        c->hl_pending = NULL;
+    }
+    c->hl_drawing = FALSE;
+    if (t != TOOL_HIGHLIGHT && t != TOOL_SELECT) {
+        c->hl_sel_layer = -1;
+        c->hl_sel_rec   = -1;
+    }
     gtk_widget_queue_draw(w);
 }
 
@@ -1086,6 +1447,104 @@ void doodle_canvas_set_view_only(GtkWidget *w, gboolean view_only) {
         c->drag_moving = FALSE;
         g_array_set_size(c->sel_origs, 0);
         selection_clear(c);
+        if (c->hl_pending) {
+            highlight_record_free(c->hl_pending);
+            c->hl_pending = NULL;
+        }
+        c->hl_drawing = FALSE;
+        c->hl_sel_layer = -1;
+        c->hl_sel_rec   = -1;
     }
     gtk_widget_queue_draw(w);
+}
+
+/* ─── 高亮：全局/局部 width 与选中 API ──────────────────────────────── */
+
+static double clamp_hl_width(double v) {
+    if (v < HIGHLIGHT_WIDTH_MIN) return HIGHLIGHT_WIDTH_MIN;
+    if (v > HIGHLIGHT_WIDTH_MAX) return HIGHLIGHT_WIDTH_MAX;
+    return v;
+}
+
+void doodle_canvas_set_global_highlight_width(GtkWidget *w, double width) {
+    CanvasCtx *c = ctx_of(w);
+    c->hl_global_width = clamp_hl_width(width);
+    /* 正在采样的记录同步调整实时预览宽度，体验更一致 */
+    if (c->hl_pending) c->hl_pending->width = c->hl_global_width;
+    gtk_widget_queue_draw(w);
+}
+
+double doodle_canvas_get_global_highlight_width(GtkWidget *w) {
+    return ctx_of(w)->hl_global_width;
+}
+
+void doodle_canvas_set_selected_highlight(GtkWidget *w,
+                                          int layer_idx, int rec_idx) {
+    CanvasCtx *c = ctx_of(w);
+    if (layer_idx < 0 || rec_idx < 0) {
+        c->hl_sel_layer = -1;
+        c->hl_sel_rec   = -1;
+    } else {
+        c->hl_sel_layer = layer_idx;
+        c->hl_sel_rec   = rec_idx;
+    }
+    gtk_widget_queue_draw(w);
+    if (c->changed_cb) c->changed_cb(c->area, c->changed_data);
+}
+
+void doodle_canvas_get_selected_highlight(GtkWidget *w,
+                                          int *layer_idx, int *rec_idx) {
+    CanvasCtx *c = ctx_of(w);
+    if (layer_idx) *layer_idx = c->hl_sel_layer;
+    if (rec_idx)   *rec_idx   = c->hl_sel_rec;
+}
+
+void doodle_canvas_set_selected_highlight_width(GtkWidget *w, double width) {
+    CanvasCtx *c = ctx_of(w);
+    if (c->hl_sel_layer < 0 || c->hl_sel_rec < 0) return;
+    if (c->hl_sel_layer >= doc_layer_count(c->doc)) return;
+    Layer *L = &g_array_index(c->doc->layers, Layer, c->hl_sel_layer);
+    if (L->kind != LAYER_HIGHLIGHT || !L->highlights) return;
+    if ((guint)c->hl_sel_rec >= L->highlights->len) return;
+    HighlightRecord *r = g_ptr_array_index(L->highlights, c->hl_sel_rec);
+    if (!r) return;
+    r->width = clamp_hl_width(width);
+    notify_changed(c);
+}
+
+void doodle_canvas_delete_selected_highlight(GtkWidget *w) {
+    CanvasCtx *c = ctx_of(w);
+    if (c->hl_sel_layer < 0 || c->hl_sel_rec < 0) return;
+    if (c->hl_sel_layer >= doc_layer_count(c->doc)) return;
+    Layer *L = &g_array_index(c->doc->layers, Layer, c->hl_sel_layer);
+    if (L->kind != LAYER_HIGHLIGHT || !L->highlights) return;
+    if ((guint)c->hl_sel_rec >= L->highlights->len) return;
+    HighlightRecord *r = g_ptr_array_index(L->highlights, c->hl_sel_rec);
+    /* highlights 创建时为 g_ptr_array_new()，无 free-func；
+     * remove_index 不会释放元素，需手动 free。 */
+    g_ptr_array_remove_index(L->highlights, (guint)c->hl_sel_rec);
+    highlight_record_free(r);
+    c->hl_sel_layer = -1;
+    c->hl_sel_rec   = -1;
+    notify_changed(c);
+    gtk_widget_queue_draw(w);
+}
+
+/* ─ 视图缩放 ─────────────────────────────────── */
+static double clamp_view_scale(double v) {
+    if (v < DOODLE_VIEW_SCALE_MIN) return DOODLE_VIEW_SCALE_MIN;
+    if (v > DOODLE_VIEW_SCALE_MAX) return DOODLE_VIEW_SCALE_MAX;
+    return v;
+}
+
+void doodle_canvas_set_view_scale(GtkWidget *w, double scale) {
+    CanvasCtx *c = ctx_of(w);
+    double v = clamp_view_scale(scale);
+    if (v == c->view_scale) return;
+    c->view_scale = v;
+    gtk_widget_queue_draw(w);
+}
+
+double doodle_canvas_get_view_scale(GtkWidget *w) {
+    return ctx_of(w)->view_scale;
 }

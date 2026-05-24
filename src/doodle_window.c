@@ -35,6 +35,17 @@ typedef struct {
     GtkWidget *tool_path;
     GtkWidget *tool_erase;
     GtkWidget *tool_select;
+    GtkWidget *tool_hl;
+
+    GtkWidget *hl_global_spin;
+    GtkWidget *hl_local_spin;
+    GtkWidget *hl_delete_btn;
+    gboolean   syncing_hl_width; /* 防 hl_local_spin 同步信号回环 */
+
+    /* 视图缩放 */
+    GtkWidget *zoom_out_btn;
+    GtkWidget *zoom_reset_btn;
+    GtkWidget *zoom_in_btn;
 } WinState;
 
 static void win_state_free(gpointer p) {
@@ -225,6 +236,9 @@ static GtkWidget *build_layer_row(int idx_in_array, gboolean is_active,
     g_free(t);
     gtk_widget_set_hexpand(nl, TRUE);
     gtk_label_set_xalign(GTK_LABEL(nl), 0.0);
+    /* 防长名字擑宽右栏：末尾省略号。 */
+    gtk_label_set_ellipsize(GTK_LABEL(nl), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(nl), 16);
     gtk_box_append(GTK_BOX(row), nl);
 
     /* 用 idx 标注便于调试，无交互 */
@@ -259,6 +273,30 @@ static void update_array_button_states(WinState *win) {
     gtk_widget_set_sensitive(win->ar_cancel_btn, active);
 }
 
+/* 根据画布高亮选中状态同步 hl_local_spin / hl_delete_btn 的可用性与值。 */
+static void update_highlight_panel(WinState *win) {
+    int li = -1, ri = -1;
+    doodle_canvas_get_selected_highlight(win->canvas, &li, &ri);
+    gboolean has = (li >= 0 && ri >= 0);
+    gtk_widget_set_sensitive(win->hl_local_spin, has);
+    if (win->hl_delete_btn)
+        gtk_widget_set_sensitive(win->hl_delete_btn, has);
+
+    if (has) {
+        Layer *L = &g_array_index(win->doc->layers, Layer, li);
+        if (L->kind == LAYER_HIGHLIGHT && L->highlights &&
+            (guint)ri < L->highlights->len) {
+            HighlightRecord *r = g_ptr_array_index(L->highlights, ri);
+            if (r) {
+                win->syncing_hl_width = TRUE;
+                gtk_spin_button_set_value(
+                    GTK_SPIN_BUTTON(win->hl_local_spin), r->width);
+                win->syncing_hl_width = FALSE;
+            }
+        }
+    }
+}
+
 static void refresh_panel(WinState *win) {
     rebuild_numbers_list(win);
     rebuild_layers_list (win);
@@ -273,6 +311,7 @@ static void refresh_panel(WinState *win) {
         gtk_widget_remove_css_class(win->missing_label, "doodle-warn-dup");
 
     update_array_button_states(win);
+    update_highlight_panel(win);
 }
 
 static void on_canvas_changed(GtkWidget *canvas, gpointer data) {
@@ -282,6 +321,62 @@ static void on_canvas_changed(GtkWidget *canvas, gpointer data) {
 
 /* ─── 信号回调 ──────────────────────────────────────────────────── */
 
+/* 视图缩放：同步当前倍率到重置按钮文本。 */
+static void zoom_sync_label(WinState *win) {
+    if (!win->canvas || !win->zoom_reset_btn) return;
+    double s = doodle_canvas_get_view_scale(win->canvas);
+    int p = (int)(s * 100.0 + 0.5);
+    char buf[16];
+    g_snprintf(buf, sizeof(buf), "%d%%", p);
+    gtk_button_set_label(GTK_BUTTON(win->zoom_reset_btn), buf);
+}
+
+/* 按位阶面调整倍率：25/50/75/100/125/150/200/300/400 */
+static double zoom_step_next(double cur, int dir) {
+    static const double steps[] = {
+        0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 2.00, 3.00, 4.00
+    };
+    int n = (int)(sizeof(steps) / sizeof(steps[0]));
+    if (dir > 0) {
+        for (int i = 0; i < n; i++) if (steps[i] > cur + 1e-6) return steps[i];
+        return steps[n - 1];
+    } else {
+        for (int i = n - 1; i >= 0; i--) if (steps[i] < cur - 1e-6) return steps[i];
+        return steps[0];
+    }
+}
+
+static void on_zoom_out_clicked(GtkButton *b, gpointer data) {
+    (void)b;
+    WinState *win = data;
+    double cur = doodle_canvas_get_view_scale(win->canvas);
+    doodle_canvas_set_view_scale(win->canvas, zoom_step_next(cur, -1));
+    zoom_sync_label(win);
+}
+
+static void on_zoom_in_clicked(GtkButton *b, gpointer data) {
+    (void)b;
+    WinState *win = data;
+    double cur = doodle_canvas_get_view_scale(win->canvas);
+    doodle_canvas_set_view_scale(win->canvas, zoom_step_next(cur, +1));
+    zoom_sync_label(win);
+}
+
+static void on_zoom_reset_clicked(GtkButton *b, gpointer data) {
+    (void)b;
+    WinState *win = data;
+    doodle_canvas_set_view_scale(win->canvas, DOODLE_VIEW_SCALE_DEF);
+    zoom_sync_label(win);
+}
+
+/* 「删除高亮」按钮回调：删除当前选中的高亮记录。 */
+static void on_hl_delete_clicked(GtkButton *btn, gpointer data) {
+    (void)btn;
+    WinState *win = data;
+    if (!win || !win->canvas) return;
+    doodle_canvas_delete_selected_highlight(win->canvas);
+}
+
 static void on_tool_toggled(GtkToggleButton *btn, gpointer data) {
     if (!gtk_toggle_button_get_active(btn)) return;
     WinState *win = data;
@@ -290,7 +385,22 @@ static void on_tool_toggled(GtkToggleButton *btn, gpointer data) {
     else if ((GtkWidget *)btn == win->tool_path  ) t = TOOL_PATH;
     else if ((GtkWidget *)btn == win->tool_erase ) t = TOOL_ERASE;
     else if ((GtkWidget *)btn == win->tool_select) t = TOOL_SELECT;
+    else if ((GtkWidget *)btn == win->tool_hl    ) t = TOOL_HIGHLIGHT;
     doodle_canvas_set_tool(win->canvas, t);
+    update_highlight_panel(win);
+}
+
+static void on_hl_global_changed(GtkSpinButton *sp, gpointer data) {
+    WinState *win = data;
+    doodle_canvas_set_global_highlight_width(win->canvas,
+        gtk_spin_button_get_value(sp));
+}
+
+static void on_hl_local_changed(GtkSpinButton *sp, gpointer data) {
+    WinState *win = data;
+    if (win->syncing_hl_width) return;
+    double v = gtk_spin_button_get_value(sp);
+    doodle_canvas_set_selected_highlight_width(win->canvas, v);
 }
 
 static void on_ar_param_changed(GtkSpinButton *sp, gpointer data) {
@@ -368,11 +478,44 @@ static GtkWidget *build_view_internal(WinState *win) {
     win->tool_path     = GTK_WIDGET(gtk_builder_get_object(b, "tool_path_btn"));
     win->tool_erase    = GTK_WIDGET(gtk_builder_get_object(b, "tool_erase_btn"));
     win->tool_select   = GTK_WIDGET(gtk_builder_get_object(b, "tool_select_btn"));
+    win->tool_hl       = GTK_WIDGET(gtk_builder_get_object(b, "tool_hl_btn"));
+    win->hl_global_spin= GTK_WIDGET(gtk_builder_get_object(b, "hl_global_spin"));
+    win->hl_local_spin = GTK_WIDGET(gtk_builder_get_object(b, "hl_local_spin"));
+    win->hl_delete_btn = GTK_WIDGET(gtk_builder_get_object(b, "hl_delete_btn"));
+
+    /* 视图缩放按钮 */
+    win->zoom_out_btn   = GTK_WIDGET(gtk_builder_get_object(b, "zoom_out_btn"));
+    win->zoom_reset_btn = GTK_WIDGET(gtk_builder_get_object(b, "zoom_reset_btn"));
+    win->zoom_in_btn    = GTK_WIDGET(gtk_builder_get_object(b, "zoom_in_btn"));
+
+    /* 同步画布全局 width 初始值到 spin */
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(win->hl_global_spin),
+        doodle_canvas_get_global_highlight_width(win->canvas));
 
     g_signal_connect(win->tool_line,   "toggled", G_CALLBACK(on_tool_toggled),  win);
     g_signal_connect(win->tool_path,   "toggled", G_CALLBACK(on_tool_toggled),  win);
     g_signal_connect(win->tool_erase,  "toggled", G_CALLBACK(on_tool_toggled),  win);
     g_signal_connect(win->tool_select, "toggled", G_CALLBACK(on_tool_toggled),  win);
+    g_signal_connect(win->tool_hl,     "toggled", G_CALLBACK(on_tool_toggled),  win);
+
+    g_signal_connect(win->hl_global_spin, "value-changed",
+                     G_CALLBACK(on_hl_global_changed), win);
+    g_signal_connect(win->hl_local_spin,  "value-changed",
+                     G_CALLBACK(on_hl_local_changed),  win);
+    if (win->hl_delete_btn)
+        g_signal_connect(win->hl_delete_btn, "clicked",
+                         G_CALLBACK(on_hl_delete_clicked), win);
+
+    if (win->zoom_out_btn)
+        g_signal_connect(win->zoom_out_btn,   "clicked",
+                         G_CALLBACK(on_zoom_out_clicked),   win);
+    if (win->zoom_reset_btn)
+        g_signal_connect(win->zoom_reset_btn, "clicked",
+                         G_CALLBACK(on_zoom_reset_clicked), win);
+    if (win->zoom_in_btn)
+        g_signal_connect(win->zoom_in_btn,    "clicked",
+                         G_CALLBACK(on_zoom_in_clicked),    win);
+    zoom_sync_label(win);
 
     g_signal_connect(win->ar_rows_spin, "value-changed", G_CALLBACK(on_ar_param_changed), win);
     g_signal_connect(win->ar_cols_spin, "value-changed", G_CALLBACK(on_ar_param_changed), win);
@@ -428,4 +571,21 @@ GtkWidget *doodle_view_new(void) {
 DoodleDoc *doodle_view_get_doc(GtkWidget *view) {
     WinState *s = g_object_get_data(G_OBJECT(view), "doodle-win-state");
     return s ? s->doc : NULL;
+}
+
+/* 设置初始工具（供 album 入口在弹出 doodle 后调用）。 */
+void doodle_window_set_initial_tool(GtkWidget *win, Tool t) {
+    WinState *s = g_object_get_data(G_OBJECT(win), "doodle-win-state");
+    if (!s) return;
+    GtkToggleButton *btn = NULL;
+    switch (t) {
+    case TOOL_LINE:      btn = GTK_TOGGLE_BUTTON(s->tool_line);   break;
+    case TOOL_PATH:      btn = GTK_TOGGLE_BUTTON(s->tool_path);   break;
+    case TOOL_ERASE:     btn = GTK_TOGGLE_BUTTON(s->tool_erase);  break;
+    case TOOL_SELECT:    btn = GTK_TOGGLE_BUTTON(s->tool_select); break;
+    case TOOL_HIGHLIGHT: btn = GTK_TOGGLE_BUTTON(s->tool_hl);     break;
+    }
+    if (btn) gtk_toggle_button_set_active(btn, TRUE);
+    doodle_canvas_set_tool(s->canvas, t);
+    update_highlight_panel(s);
 }
