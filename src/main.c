@@ -1,48 +1,164 @@
 /**
- * notework — 主窗口：基准行 + 虚拟列表（GtkListView）
- * 编译标准: C11，无 SIMD / 内联汇编 / 字节序假设
+ * notework — 主程序入口（Phase 2.x）
  *
- * 文件分工：
- *   src/window.ui   —— 主窗口骨架（GtkBuilder XML）
- *   src/row.ui      —— 数据行模板（GtkBuilderListItemFactory）
- *   src/style.css   —— 全局样式
- * 三者通过 GResource 在编译期嵌入到可执行文件中。
+ * 主窗口结构（参见 src/window.ui）：
+ *   AdwApplicationWindow main_window
+ *   └── AdwToolbarView
+ *       ├── [top] AdwHeaderBar  +  AdwViewSwitcher (stack=main_stack)
+ *       └── [content] AdwViewStack main_stack
+ *           ├── page "album"    → GtkBox album_holder
+ *           │     运行时由 album_view_new(album) 返回的内嵌控件填入
+ *           └── page "timeline" → 进度轴 + 轨道列表
+ *               ├── GtkScrolledWindow header_scroller
+ *               │     └── GtkDrawingArea progress_axis_canvas
+ *               └── GtkScrolledWindow body_scroller
+ *                     └── GtkBox track_container (各 track_row 行)
  *
- * 本文件只做四件事：
- *   1) 应用启动一次性安装 CSS（startup 信号）
- *   2) 激活时构建窗口、装入数据模型
- *   3) 把 +/- 按钮挂上模型增删回调
- *   4) 把基准行宽度 / 水平滚动位置与数据列表保持同步
+ * 本期（Phase 2.x）增量：
+ *   - 进度轴渲染/交互移到 src/progress_axis.{c,h}；main.c 仅作为粘合层。
+ *   - album_view_set_changed_cb 注册 on_album_changed：相册变动 → 重算
+ *     进度轴 + 重新装填轨道行 bar 宽度。
  */
 
 #include <adwaita.h>
 
-/* 初始行数：演示用；GtkListView 是虚拟列表，把它改到 1_000_000 也能瞬开。 */
-#define INITIAL_ROWS 1000
+#include "album.h"
+#include "doodle.h"
+#include "progress_axis.h"
+#include "track_row.h"
 
-/* ─── 按钮回调：模型增删 ───────────────────────────────────────────── */
+/* ─── 视图状态：随 main_window 生命周期销毁 ─────────────────────── */
 
-static void
-on_add_row_clicked(GtkButton *button, gpointer user_data)
+typedef struct {
+    Album         *album;            /* 由本结构拥有 */
+    ProgressAxis  *axis;             /* 由本结构拥有 */
+
+    GtkWidget     *album_holder;
+    GtkWidget     *axis_canvas;
+    GtkWidget     *track_container;     /* 右侧：众 bar 纵堆 */
+    GtkWidget     *sidebar_container;   /* 左侧：众「名称+删除」行 */
+    GtkScrolledWindow *header_sw;
+    GtkScrolledWindow *body_sw;
+    GtkScrolledWindow *sidebar_sw;
+} AppView;
+
+/* ─── 轨道行装填 ─────────────────────────────────────────────────── */
+
+/* 删除回调：sidebar 中 × 按钮挂 "track-idx" qdata，clicked 时取出。 */
+static void on_sidebar_delete_clicked(GtkButton *btn, gpointer user_data);
+
+/* 构造 sidebar 中的一行：名称标签 + × 删除按钮。track_idx 通过
+ * GINT_TO_POINTER 挂在 × 按钮上。 */
+static GtkWidget *
+build_sidebar_row(AppView *v, int track_idx, const char *name)
 {
-    (void)button;
-    GtkStringList *list = GTK_STRING_LIST(user_data);
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_size_request(row, -1, 32);
+    /* 显式 hexpand=false，阻断内部 label hexpand=true 沿 row 向上
+     * 冒泡到 sidebar_scroller。 */
+    gtk_widget_set_hexpand(row, FALSE);
 
-    char buf[64];
-    g_snprintf(buf, sizeof buf, "数据行 #%u",
-               g_list_model_get_n_items(G_LIST_MODEL(list)) + 1);
-    gtk_string_list_append(list, buf);
+    GtkWidget *lbl = gtk_label_new(name ? name : "(unnamed)");
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0);
+    gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_hexpand(lbl, TRUE);
+    gtk_widget_set_margin_start(lbl, 8);
+    gtk_box_append(GTK_BOX(row), lbl);
+
+    GtkWidget *del = gtk_button_new_from_icon_name("window-close-symbolic");
+    gtk_widget_add_css_class(del, "flat");
+    gtk_widget_add_css_class(del, "circular");
+    gtk_widget_set_tooltip_text(del, "删除该轨道");
+    gtk_widget_set_valign(del, GTK_ALIGN_CENTER);
+    g_object_set_data(G_OBJECT(del), "track-idx",
+                       GINT_TO_POINTER(track_idx));
+    g_signal_connect(del, "clicked",
+                     G_CALLBACK(on_sidebar_delete_clicked), v);
+    gtk_box_append(GTK_BOX(row), del);
+
+    return row;
 }
 
 static void
-on_del_row_clicked(GtkButton *button, gpointer user_data)
+populate_tracks(AppView *v)
 {
-    (void)button;
-    GtkStringList *list = GTK_STRING_LIST(user_data);
+    /* 同时清空两侧 */
+    for (GtkWidget *c = gtk_widget_get_first_child(v->track_container); c; ) {
+        GtkWidget *next = gtk_widget_get_next_sibling(c);
+        gtk_box_remove(GTK_BOX(v->track_container), c);
+        c = next;
+    }
+    for (GtkWidget *c = gtk_widget_get_first_child(v->sidebar_container); c; ) {
+        GtkWidget *next = gtk_widget_get_next_sibling(c);
+        gtk_box_remove(GTK_BOX(v->sidebar_container), c);
+        c = next;
+    }
 
-    guint n = g_list_model_get_n_items(G_LIST_MODEL(list));
-    if (n > 0)
-        gtk_string_list_remove(list, n - 1);
+    int bar_w = progress_axis_get_content_width(v->axis);
+    /* 无论是否有轨道，track_container 最小宽度始终与进度轴一致，
+     * 确保 body_scroller 有足够宽度产生水平滚动。 */
+    gtk_widget_set_size_request(v->track_container, bar_w, -1);
+    int n     = (v->album && v->album->tracks)
+                ? (int)v->album->tracks->len : 0;
+    for (int i = 0; i < n; i++) {
+        Track *t = &g_array_index(v->album->tracks, Track, (guint)i);
+        gtk_box_append(GTK_BOX(v->sidebar_container),
+                       build_sidebar_row(v, i, t ? t->name : NULL));
+
+        GtkWidget *bar = track_row_new(v->album, v->axis, i, bar_w);
+        gtk_box_append(GTK_BOX(v->track_container), bar);
+        /* track_row_new 为 transfer-full：append 加 ref，这里平衡。 */
+        g_object_unref(bar);
+    }
+}
+
+/* ─── Album 变更回调：进度轴重算 + 轨道重填 ─────────────────────── */
+
+static void
+on_album_changed(GtkWidget *album_view, gpointer user_data)
+{
+    (void)album_view;
+    AppView *v = user_data;
+    if (!v) return;
+    progress_axis_refresh(v->axis);
+    populate_tracks(v);
+}
+
+/* ─── 轨道增删交互回调 ─────────────────────────────────────────── */
+
+static void
+on_track_add_clicked(GtkButton *btn, gpointer user_data)
+{
+    (void)btn;
+    AppView *v = user_data;
+    if (!v) return;
+    album_track_append(v->album, NULL);   /* 默认名 "轨道 N" */
+    on_album_changed(NULL, v);
+}
+
+static void
+on_sidebar_delete_clicked(GtkButton *btn, gpointer user_data)
+{
+    AppView *v = user_data;
+    int idx = GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(btn), "track-idx"));
+    if (!v) return;
+    if (album_track_remove(v->album, idx))
+        on_album_changed(NULL, v);
+}
+
+/* ─── 滚动同步 ─────────────────────────────────────────────── */
+/*  · 水平：header 直接使用 body 的 hadjustment，两者始终同步。
+ *  · 垂直：sidebar 与 body 共享 vadjustment，同步轨道行与名称行。 */
+static void
+wire_scroll_sync(AppView *v)
+{
+    GtkAdjustment *body_h = gtk_scrolled_window_get_hadjustment(v->body_sw);
+    gtk_scrolled_window_set_hadjustment(v->header_sw, body_h);
+
+    GtkAdjustment *body_v = gtk_scrolled_window_get_vadjustment(v->body_sw);
+    if (v->sidebar_sw && body_v)
+        gtk_scrolled_window_set_vadjustment(v->sidebar_sw, body_v);
 }
 
 /* ─── 一次性安装应用全局 CSS ─────────────────────────────────────── */
@@ -60,57 +176,24 @@ install_app_css(void)
     g_object_unref(css);
 }
 
-/* ─── 构建初始数据模型 ───────────────────────────────────────────── */
+/* ─── AppView 释放（挂在 main_window 上，窗口销毁时调用） ─────── */
 
-static GtkStringList *
-build_initial_model(void)
+static void
+appview_free(gpointer data)
 {
-    GtkStringList *m = gtk_string_list_new(NULL);
-    char buf[256];
-    for (guint i = 1; i <= INITIAL_ROWS; i++) {
-        if (i % 7 == 0)
-            g_snprintf(buf, sizeof buf,
-                "数据行 #%u — 超长内容示例：这一行文字特别长用于演示水平滚动条的出现与拖动", i);
-        else
-            g_snprintf(buf, sizeof buf, "数据行 #%u", i);
-        gtk_string_list_append(m, buf);
+    AppView *v = data;
+    if (!v) return;
+    /* axis 持有 canvas 的 draw_func 与 gesture，必须在 album_free 之前
+     * 解除（draw 期间访问 album），因此先 free axis 再 free album。 */
+    if (v->axis) {
+        progress_axis_free(v->axis);
+        v->axis = NULL;
     }
-    return m;
-}
-
-/* ─── 把 +/- 按钮接到模型 ────────────────────────────────────────── */
-
-static void
-wire_actions(GtkBuilder *b, GListModel *model)
-{
-    g_signal_connect(gtk_builder_get_object(b, "add_row_btn"),
-                     "clicked", G_CALLBACK(on_add_row_clicked), model);
-    g_signal_connect(gtk_builder_get_object(b, "del_row_btn"),
-                     "clicked", G_CALLBACK(on_del_row_clicked), model);
-}
-
-/* ─── 把基准行与数据列表的水平方向保持一致 ──────────────────────────
- *
- *   (a) baseline_label.width-request  ← body.hadjustment.upper
- *       表头内容宽度跟随数据区总宽度，否则 header 上限 = 0、滚不动
- *   (b) header.hadjustment.value      ← body.hadjustment.value
- *       拖动数据区水平滑块时，基准行同步平移；单向以避免反向夾紧
- */
-static void
-wire_horizontal_sync(GtkBuilder *b)
-{
-    GtkAdjustment *body_h = gtk_scrolled_window_get_hadjustment(
-        GTK_SCROLLED_WINDOW(gtk_builder_get_object(b, "body_scroller")));
-    GtkAdjustment *head_h = gtk_scrolled_window_get_hadjustment(
-        GTK_SCROLLED_WINDOW(gtk_builder_get_object(b, "header_scroller")));
-    GObject *baseline = gtk_builder_get_object(b, "baseline_label");
-
-    g_object_bind_property(body_h, "upper",
-                           baseline, "width-request",
-                           G_BINDING_SYNC_CREATE);
-    g_object_bind_property(body_h, "value",
-                           head_h, "value",
-                           G_BINDING_SYNC_CREATE);
+    if (v->album) {
+        album_free(v->album);
+        v->album = NULL;
+    }
+    g_free(v);
 }
 
 /* ─── 应用生命周期 ───────────────────────────────────────────────── */
@@ -130,21 +213,48 @@ on_activate(GApplication *app, gpointer user_data)
     GtkBuilder *builder = gtk_builder_new_from_resource(
         "/com/github/notework/window.ui");
 
-    /* 数据模型注入到 XML 里预先存在的 GtkNoSelection */
-    GtkStringList  *model = build_initial_model();
-    GtkNoSelection *sel   = GTK_NO_SELECTION(
-        gtk_builder_get_object(builder, "data_selection"));
-    gtk_no_selection_set_model(sel, G_LIST_MODEL(model));
-    g_object_unref(model);  /* selection 已接管引用 */
+    AppView *v = g_new0(AppView, 1);
+    v->album            = album_new();
+    v->album_holder     = GTK_WIDGET(gtk_builder_get_object(builder, "album_holder"));
+    v->axis_canvas      = GTK_WIDGET(gtk_builder_get_object(builder, "progress_axis_canvas"));
+    v->track_container  = GTK_WIDGET(gtk_builder_get_object(builder, "track_container"));
+    v->sidebar_container= GTK_WIDGET(gtk_builder_get_object(builder, "sidebar_container"));
+    v->header_sw        = GTK_SCROLLED_WINDOW(gtk_builder_get_object(builder, "header_scroller"));
+    v->body_sw          = GTK_SCROLLED_WINDOW(gtk_builder_get_object(builder, "body_scroller"));
+    v->sidebar_sw       = GTK_SCROLLED_WINDOW(gtk_builder_get_object(builder, "sidebar_scroller"));
 
-    wire_actions(builder, gtk_no_selection_get_model(sel));
-    wire_horizontal_sync(builder);
+    /* 进度轴：在装填 track 行之前构造，以便后者拿到 content_width */
+    v->axis = progress_axis_new(GTK_DRAWING_AREA(v->axis_canvas), v->album);
+    progress_axis_refresh(v->axis);
+    /* 播放头拖动手势（点击/拖动进度轴移动播放头） */
+    progress_axis_setup_playhead(v->axis, v->track_container);
+
+    /* 装填相册编辑视图（共享 album） */
+    GtkWidget *alb_view = album_view_new(v->album);
+    gtk_box_append(GTK_BOX(v->album_holder), alb_view);
+
+    /* 注册变更通道：相册任何修改 → 进度轴重算 + 轨道行重填 */
+    album_view_set_changed_cb(alb_view, on_album_changed, v);
+
+    /* 滚动同步 + 首次轨道装填 */
+    wire_scroll_sync(v);
+    populate_tracks(v);
+
+    /* 连接「+ 新建轨道」按钮 */
+    GtkButton *add_btn = GTK_BUTTON(
+        gtk_builder_get_object(builder, "track_add_button"));
+    if (add_btn)
+        g_signal_connect(add_btn, "clicked",
+                         G_CALLBACK(on_track_add_clicked), v);
 
     GtkWindow *win = GTK_WINDOW(
         gtk_builder_get_object(builder, "main_window"));
     gtk_window_set_application(win, GTK_APPLICATION(app));
-    gtk_window_present(win);
 
+    /* AppView 生命周期跟随窗口 */
+    g_object_set_data_full(G_OBJECT(win), "app-view", v, appview_free);
+
+    gtk_window_present(win);
     g_object_unref(builder);
 }
 

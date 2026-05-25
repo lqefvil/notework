@@ -94,6 +94,15 @@ void   shape_path_add_point(Shape *s, DPoint p);
 Shape *shape_clone(const Shape *s);
 void   shape_free(Shape *s);
 
+/* ─── 几何弧长（进度轴使用） ──────────────────────────────────────
+ * SHAPE_LINE: 两点欧氏距离
+ * SHAPE_PATH: 相邻点距离累加
+ * SHAPE_ARRAY: 0（本期不参与进度轴聚合，避免与组内副本编号体系混淆）
+ * doodle_doc_total_arc: 遍历 doc 内所有 LAYER_DOODLE 层，对其每个 shape
+ *   调用 shape_arc_length 求和；不计入隐藏图层。 */
+double shape_arc_length(const Shape *s);
+double doodle_doc_total_arc(const DoodleDoc *doc);
+
 /* ─── 文档/编号 API ───────────────────────────────────────────── */
 DoodleDoc  *doodle_doc_new(void);
 /* 创建不包含任何图层的空文档，调用者需自行插入首层

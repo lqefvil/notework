@@ -31,8 +31,11 @@ typedef enum {
 struct AlbumState {
     GtkBuilder *builder;
     Album      *album;
+    gboolean    owns_album;   /* TRUE: 本 state 创建了 album，析构时需 free */
 
-    GtkWidget *awin;
+    GtkWidget *awin;          /* 独立窗口模式下为 AdwApplicationWindow；
+                               * 内嵌视图模式下为 NULL，顶层窗口由
+                               * gtk_widget_get_root() 动态获取。 */
     GtkWidget *pages_list;
     GtkWidget *layers_list;
     GtkWidget *preview_holder;
@@ -57,14 +60,34 @@ struct AlbumState {
 
     /* 防止刷新引发的 row-selected 反复触发 */
     gboolean refreshing;
+
+    /* 外部变更订阅。view_widget 是 album_window_new/album_view_new
+     * 返回的控件（album-state 以 g_object_set_data 挂在其上）。 */
+    AlbumChangedFn changed_cb;
+    gpointer       changed_data;
+    GtkWidget     *view_widget;
 };
 
 static void al_state_free(gpointer p) {
     AlbumState *s = p;
     if (!s) return;
     if (s->builder) g_object_unref(s->builder);
-    if (s->album)   album_free(s->album);
+    if (s->album && s->owns_album) album_free(s->album);
     g_free(s);
+}
+
+/* 获取顶层窗口：
+ *  - 独立窗口模式：返回 st->awin（在 album_window_new 中设置）
+ *  - 内嵌视图模式：通过任一已附加控件取 GtkRoot
+ * 供文件对话、wait 光标、doodle_window transient 等使用。 */
+static GtkWindow *al_root_window(AlbumState *st) {
+    if (!st) return NULL;
+    if (st->awin) return GTK_WINDOW(st->awin);
+    GtkWidget *anchor = st->preview_canvas ? st->preview_canvas
+                                            : st->pages_list;
+    if (!anchor) return NULL;
+    GtkRoot *r = gtk_widget_get_root(anchor);
+    return r ? GTK_WINDOW(r) : NULL;
 }
 
 /* 把"自上而下"的可视下标转成 doc->layers 内部下标 */
@@ -269,7 +292,8 @@ static GtkWidget *build_layer_row(int visual_idx, const Layer *L) {
     gtk_widget_set_margin_top   (row, 4);
     gtk_widget_set_margin_bottom(row, 4);
 
-    const char *tag = (L->kind == LAYER_DOODLE) ? "[涂鸦]" : "[图片]";
+    const char *tag = (L->kind == LAYER_DOODLE)   ? "[涂鸦]" :
+                      (L->kind == LAYER_HIGHLIGHT) ? "[高亮]" : "[图片]";
     GtkWidget *tlbl = gtk_label_new(tag);
     gtk_widget_set_size_request(tlbl, 60, -1);
     gtk_label_set_xalign(GTK_LABEL(tlbl), 0.0);
@@ -330,7 +354,8 @@ static void refresh_selection_info(AlbumState *st) {
         return;
     }
     Layer *L = &g_array_index(p->doc->layers, Layer, di);
-    const char *kind = (L->kind == LAYER_DOODLE) ? "涂鸦" : "图片";
+    const char *kind = (L->kind == LAYER_DOODLE)   ? "涂鸦" :
+                       (L->kind == LAYER_HIGHLIGHT) ? "高亮" : "图片";
     const char *vis  = L->visible ? "可见" : "已隐藏";
     char *txt = NULL;
     if (L->kind == LAYER_DOODLE) {
@@ -338,6 +363,11 @@ static void refresh_selection_info(AlbumState *st) {
             "选中图层 #%d  [%s]  %s  ·  %s  ·  形状 %u 个",
             v, kind, L->name ? L->name : "(unnamed)", vis,
             (unsigned)L->store.n);
+    } else if (L->kind == LAYER_HIGHLIGHT) {
+        guint n_hl = L->highlights ? L->highlights->len : 0;
+        txt = g_strdup_printf(
+            "选中图层 #%d  [%s]  %s  ·  %s  ·  高亮记录 %u 条",
+            v, kind, L->name ? L->name : "(unnamed)", vis, n_hl);
     } else {
         txt = g_strdup_printf(
             "选中图层 #%d  [%s]  %s  ·  %s  ·  %d×%d",
@@ -378,10 +408,18 @@ static void refresh_layers_list(AlbumState *st) {
         gtk_list_box_append(GTK_LIST_BOX(st->layers_list),
                              build_layer_row(v, L));
     }
-    /* 选中：如果尚未选但有图层，默认选顶层（可视下标 0），
-     * 否则“复制图层”等依赖选中的按钮会一直是灰色。 */
+    /* 选中：如果尚未选但有图层，优先选第一个非高亮图层（便于复制图层操作），
+     * 无则兜底选顶层（可视下标 0）。 */
     if (st->selected_layer_visual < 0 && n > 0) {
-        st->selected_layer_visual = 0;
+        st->selected_layer_visual = 0; /* 兜底 */
+        for (int fv = 0; fv < n; fv++) {
+            int fdi = visual_to_doc_idx(p->doc, fv);
+            Layer *FL = &g_array_index(p->doc->layers, Layer, fdi);
+            if (FL->kind != LAYER_HIGHLIGHT) {
+                st->selected_layer_visual = fv;
+                break;
+            }
+        }
     }
     if (st->selected_layer_visual >= n) {
         st->selected_layer_visual = n - 1;
@@ -410,11 +448,20 @@ static void refresh_buttons_sensitive(AlbumState *st) {
     int ln = p && p->doc ? doc_layer_count(p->doc) : 0;
     gboolean has_layer = (st->selected_layer_visual >= 0 &&
                           st->selected_layer_visual < ln);
+    /* 高亮图层不参与跨页复制 */
+    gboolean sel_is_highlight = FALSE;
+    if (has_layer && p && p->doc) {
+        int di = visual_to_doc_idx(p->doc, st->selected_layer_visual);
+        if (di >= 0) {
+            Layer *SL = &g_array_index(p->doc->layers, Layer, di);
+            sel_is_highlight = (SL->kind == LAYER_HIGHLIGHT);
+        }
+    }
     gtk_widget_set_sensitive(st->layer_up_btn,      has_layer && st->selected_layer_visual > 0);
     gtk_widget_set_sensitive(st->layer_down_btn,    has_layer && st->selected_layer_visual < ln - 1);
     gtk_widget_set_sensitive(st->layer_visible_btn, has_layer);
     gtk_widget_set_sensitive(st->layer_delete_btn,  has_layer && ln > 1);
-    gtk_widget_set_sensitive(st->copy_layer_btn,    has_layer && album_page_count(st->album) > 1);
+    gtk_widget_set_sensitive(st->copy_layer_btn,    has_layer && !sel_is_highlight && album_page_count(st->album) > 1);
 }
 
 static void refresh_all(AlbumState *st) {
@@ -423,6 +470,8 @@ static void refresh_all(AlbumState *st) {
     refresh_status(st);
     refresh_buttons_sensitive(st);
     if (st->preview_canvas) gtk_widget_queue_draw(st->preview_canvas);
+    if (st->changed_cb)
+        st->changed_cb(st->view_widget, st->changed_data);
 }
 
 /* ─── 信号回调 ──────────────────────────────────────────────── */
@@ -589,7 +638,8 @@ static void on_doodle_clicked(GtkButton *btn, gpointer data) {
         int th = (ch > 0) ? (int)ch + CHROME_H : 760;
 
         GdkRectangle geom = {0, 0, 1920, 1080};
-        GdkSurface *surf = gtk_native_get_surface(GTK_NATIVE(st->awin));
+        GtkWindow  *root = al_root_window(st);
+        GdkSurface *surf = root ? gtk_native_get_surface(GTK_NATIVE(root)) : NULL;
         if (surf) {
             GdkDisplay *disp = gdk_surface_get_display(surf);
             GdkMonitor *mon = disp
@@ -605,9 +655,10 @@ static void on_doodle_clicked(GtkButton *btn, gpointer data) {
         gtk_window_set_default_size(GTK_WINDOW(dwin), tw, th);
     }
     /* 关联到当前应用 */
-    GtkApplication *app = gtk_window_get_application(GTK_WINDOW(st->awin));
+    GtkWindow *root = al_root_window(st);
+    GtkApplication *app = root ? gtk_window_get_application(root) : NULL;
     if (app) gtk_window_set_application(GTK_WINDOW(dwin), app);
-    gtk_window_set_transient_for(GTK_WINDOW(dwin), GTK_WINDOW(st->awin));
+    if (root) gtk_window_set_transient_for(GTK_WINDOW(dwin), root);
     gtk_window_set_modal(GTK_WINDOW(dwin), FALSE);
     g_signal_connect_data(dwin, "close-request",
                           G_CALLBACK(on_doodle_close_request),
@@ -785,7 +836,9 @@ static void import_files_finish(GObject *src, GAsyncResult *res, gpointer data) 
     gtk_widget_set_sensitive(st->import_image_btn, FALSE);
     gtk_widget_set_sensitive(st->import_pdf_btn,   FALSE);
     GdkCursor *busy = gdk_cursor_new_from_name("wait", NULL);
-    gtk_widget_set_cursor(GTK_WIDGET(st->awin), busy);
+    GtkWindow *root_for_cursor = al_root_window(st);
+    if (root_for_cursor)
+        gtk_widget_set_cursor(GTK_WIDGET(root_for_cursor), busy);
     if (busy) g_object_unref(busy);
     /* 立即刷一帧，使 wait 光标生效 */
     while (g_main_context_iteration(NULL, FALSE)) {}
@@ -797,7 +850,8 @@ static void import_files_finish(GObject *src, GAsyncResult *res, gpointer data) 
     g_free(arr);
     g_object_unref(files);
 
-    gtk_widget_set_cursor(GTK_WIDGET(st->awin), NULL);
+    if (root_for_cursor)
+        gtk_widget_set_cursor(GTK_WIDGET(root_for_cursor), NULL);
     gtk_widget_set_sensitive(st->import_image_btn, TRUE);
     gtk_widget_set_sensitive(st->import_pdf_btn,   TRUE);
 
@@ -833,7 +887,7 @@ static void start_import_dialog(AlbumState *st, gboolean pdf_only) {
 
     ImportPickCtx *ipc = g_new0(ImportPickCtx, 1);
     ipc->st = st; ipc->pdf_only = pdf_only;
-    gtk_file_dialog_open_multiple(dlg, GTK_WINDOW(st->awin), NULL,
+    gtk_file_dialog_open_multiple(dlg, al_root_window(st), NULL,
                                    import_files_finish, ipc);
     g_object_unref(dlg);
 }
@@ -862,15 +916,107 @@ static GtkWidget *grab(GtkBuilder *b, const char *id) {
     return GTK_WIDGET(gtk_builder_get_object(b, id));
 }
 
+/* 共用：从 builder 抓控件、构造预览画布、绑定信号。
+ * 调用前必须设置 st->album / st->builder；st->awin 可为 NULL（内嵌模式）。
+ * refresh_all 与 album-state 生命周期由各入口按各自语义负责。 */
+static void build_view_internal(AlbumState *st);
+
 GtkWidget *album_window_new(void) {
     AlbumState *st = g_new0(AlbumState, 1);
     st->album = album_new();
+    st->owns_album = TRUE;
     st->selected_layer_visual = -1;
 
     GtkBuilder *b = gtk_builder_new_from_resource(
         "/com/github/notework/album/album_window.ui");
     st->builder = b;
-    st->awin            = grab(b, "awin");
+    st->awin = grab(b, "awin");
+    st->view_widget = st->awin;
+    build_view_internal(st);
+    g_object_set_data_full(G_OBJECT(st->awin), "album-state",
+                            st, al_state_free);
+    refresh_all(st);
+    return st->awin;
+}
+
+/* 内嵌视图：复用 album_window.ui，但剥出 AdwApplicationWindow 下的
+ * AdwToolbarView 作为内嵌根；原临时 awin 被销毁。
+ * 调用方使用 gtk_box_append() 等将返回控件装入主窗口。 */
+GtkWidget *album_view_new(Album *album) {
+    g_return_val_if_fail(album != NULL, NULL);
+
+    AlbumState *st = g_new0(AlbumState, 1);
+    st->album = album;
+    st->owns_album = FALSE;
+    st->selected_layer_visual = -1;
+
+    GtkBuilder *b = gtk_builder_new_from_resource(
+        "/com/github/notework/album/album_window.ui");
+    st->builder = b;
+
+    /* 仅作为中转：入口是 AdwApplicationWindow，我们取出其 content
+     * 作为内嵌根，随后销毁该外包。 */
+    GtkWidget *awin    = grab(b, "awin");
+    GtkWidget *content = adw_application_window_get_content(
+                            ADW_APPLICATION_WINDOW(awin));
+    g_return_val_if_fail(content != NULL, NULL);
+
+    /* set_content(NULL) 会 unparent 并 unref 该子节点；提前取一份强
+     * 引用避免子节点在这一步被销毁。 */
+    g_object_ref(content);
+    adw_application_window_set_content(
+        ADW_APPLICATION_WINDOW(awin), NULL);
+
+    st->awin = NULL;  /* 内嵌模式 */
+    st->view_widget = content;
+    build_view_internal(st);
+
+    /* 内嵌模式下隐藏 album 自带 HeaderBar 上的窗口装饰按钮与
+     * “Notework”标题，仅保留左/右侧的导入、涂鸦、复制图层等
+     * 按钮，避免与主窗口顶部 HeaderBar 重叠成两条。 */
+    {
+        GtkWidget *hb = grab(b, "album_headerbar");
+        if (hb) {
+            adw_header_bar_set_show_start_title_buttons(
+                ADW_HEADER_BAR(hb), FALSE);
+            adw_header_bar_set_show_end_title_buttons(
+                ADW_HEADER_BAR(hb), FALSE);
+            adw_header_bar_set_show_title(
+                ADW_HEADER_BAR(hb), FALSE);
+        }
+    }
+
+    /* state 生命周期随 content（即内嵌视图根） */
+    g_object_set_data_full(G_OBJECT(content), "album-state",
+                            st, al_state_free);
+
+    /* 释放临时外包 awin（其 content 已被取走）。
+     * awin 仍被 builder 持有，destroy 仅触发 dispose；待 al_state_free
+     * 释放 builder 时 awin 才 finalize。 */
+    gtk_window_destroy(GTK_WINDOW(awin));
+
+    /* 抵消 step 1 加的引用。此后 content.ref = 1（仅由 builder 持有），
+     * 调用方 gtk_box_append 会再 ref +1；窗口销毁时实现 content.ref:
+     *   container.unparent → -1 → 1
+     *   al_state_free → unref(builder) → -1 → 0 → finalize ✓ */
+    g_object_unref(content);
+
+    refresh_all(st);
+    return content;
+}
+
+void album_view_set_changed_cb(GtkWidget *album_view,
+                                AlbumChangedFn cb, gpointer user_data)
+{
+    if (!album_view) return;
+    AlbumState *st = g_object_get_data(G_OBJECT(album_view), "album-state");
+    if (!st) return;
+    st->changed_cb   = cb;
+    st->changed_data = user_data;
+}
+
+static void build_view_internal(AlbumState *st) {
+    GtkBuilder *b = st->builder;
     st->pages_list      = grab(b, "pages_list");
     st->layers_list     = grab(b, "layers_list");
     st->preview_holder  = grab(b, "preview_holder");
@@ -933,12 +1079,6 @@ GtkWidget *album_window_new(void) {
                      G_CALLBACK(on_layer_visible_clicked),st);
     g_signal_connect(st->layer_delete_btn, "clicked",
                      G_CALLBACK(on_layer_delete_clicked), st);
-
-    g_object_set_data_full(G_OBJECT(st->awin), "album-state",
-                            st, al_state_free);
-
-    refresh_all(st);
-    return st->awin;
 }
 
 /* ─── 复制图层对话框（实现） ─────────────────────────────────── */
@@ -1047,7 +1187,10 @@ static void open_copy_layer_dialog(AlbumState *st) {
     GtkWidget *dlg = gtk_window_new();
     gtk_window_set_title(GTK_WINDOW(dlg), "复制图层到其他页");
     gtk_window_set_modal(GTK_WINDOW(dlg), TRUE);
-    gtk_window_set_transient_for(GTK_WINDOW(dlg), GTK_WINDOW(st->awin));
+    {
+        GtkWindow *root = al_root_window(st);
+        if (root) gtk_window_set_transient_for(GTK_WINDOW(dlg), root);
+    }
     gtk_window_set_default_size(GTK_WINDOW(dlg), 380, 460);
 
     GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);

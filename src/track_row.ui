@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  track_row.ui — 轨道 bar（仅条带）
+  「标签 + 删除按钮」由 main.c 在左侧固定 sidebar 中 inline 构造，
+  本文件仅承载 bar：DrawingArea 的 width 由 main.c 设为与进度轴等宽，
+  绘制与拖动交互在 src/track_row.c 内实现。
+-->
+<interface>
+  <requires lib="gtk" version="4.10"/>
+
+  <object class="GtkDrawingArea" id="track_bar">
+    <property name="height-request">32</property>
+    <property name="hexpand">true</property>
+    <property name="css-classes">track-bar</property>
+  </object>
+</interface>

@@ -1,20 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  window.ui — 主窗口
-  结构：
+  window.ui — Notework 主窗口（双视图骨架）
+  顶层结构：
     AdwApplicationWindow
     └── AdwToolbarView
-        ├── [top]     AdwHeaderBar（含 +/− 按钮）
-        └── [content] GtkBox (vertical)
-            ├── GtkScrolledWindow header_scroller    (hscroll=external, vscroll=never)
-            │   └── GtkBox baseline_row              (高 40，CSS 类 baseline-frame)
-            │       └── GtkLabel baseline_label      (xalign=0)
-            └── GtkScrolledWindow body_scroller      (hscroll/vscroll=automatic)
-                └── GtkListView data_list            (CSS 类 flat-rows，工厂引用 row.ui)
+        ├── [top]    AdwHeaderBar
+        │            └── title-widget: AdwViewSwitcher（绑定 main_stack）
+        └── [content] AdwViewStack id=main_stack
+            ├── page "album"     —— 相册编辑视图（运行时由 album_view_new()
+            │                        构造的内嵌控件填充 album_holder）
+            └── page "timeline"  —— 进度轴 + 轨道列表（双区竖排）
+                GtkBox vertical
+                ├── GtkScrolledWindow header_scroller
+                │     hscrollbar-policy=external, vscrollbar-policy=never
+                │   └── GtkDrawingArea progress_axis_canvas (height-request=80)
+                └── GtkScrolledWindow body_scroller
+                      hscrollbar-policy=automatic, vscrollbar-policy=automatic
+                    └── GtkBox track_container (orientation=vertical)
 
-  基准行与数据行结构对称（GtkBox + GtkLabel + 两侧 12px margin），
-  仅以 CSS class 区分外观。两个 ScrolledWindow 的水平 GtkAdjustment
-  在 main.c 中单向同步（body → header），形成“冻结表头”效果。
+  说明：
+  · header_scroller 与 body_scroller 的水平 GtkAdjustment 在 main.c 中
+    单向绑定（body.value → header.value），形成“冻结表头”效果。
+  · 轨道行由 main.c 用 track_row.ui 模板加载并 append 到 track_container；
+    每行 bar 的 width-request 由主程序设为与进度轴等宽，使 listview 横向
+    可滚动上限等于进度轴宽度。
 -->
 <interface>
   <requires lib="gtk" version="4.10"/>
@@ -22,80 +31,149 @@
 
   <object class="AdwApplicationWindow" id="main_window">
     <property name="title">Notework</property>
-    <property name="default-width">800</property>
-    <property name="default-height">600</property>
+    <property name="default-width">1024</property>
+    <property name="default-height">700</property>
 
     <property name="content">
       <object class="AdwToolbarView">
 
-        <!-- 顶部标题栏 -->
+        <!-- 顶部标题栏（含视图切换器） -->
         <child type="top">
           <object class="AdwHeaderBar">
-            <child type="end">
-              <object class="GtkButton" id="add_row_btn">
-                <property name="label">＋ 添加行</property>
-                <property name="tooltip-text">在末尾追加一行</property>
+            <property name="title-widget">
+              <object class="AdwViewSwitcher">
+                <property name="stack">main_stack</property>
+                <property name="policy">wide</property>
               </object>
-            </child>
-            <child type="end">
-              <object class="GtkButton" id="del_row_btn">
-                <property name="label">－ 删除行</property>
-                <property name="tooltip-text">删除最后一行</property>
-              </object>
-            </child>
+            </property>
           </object>
         </child>
 
-        <!-- 中央内容区 -->
+        <!-- 中央内容区：双页 ViewStack -->
         <property name="content">
-          <object class="GtkBox">
-            <property name="orientation">vertical</property>
+          <object class="AdwViewStack" id="main_stack">
 
-            <!-- (1) 基准行：表头载体，可被外部控制水平滚动 -->
+            <!-- ── 页 1：相册编辑（内嵌 album_view） ─────────────── -->
             <child>
-              <object class="GtkScrolledWindow" id="header_scroller">
-                <property name="hscrollbar-policy">external</property>
-                <property name="vscrollbar-policy">never</property>
-                <property name="propagate-natural-height">true</property>
-                <child>
-                  <object class="GtkBox" id="baseline_row">
-                    <property name="orientation">horizontal</property>
-                    <property name="height-request">40</property>
-                    <property name="margin-start">12</property>
-                    <property name="margin-end">12</property>
-                    <property name="css-classes">baseline-frame</property>
-                    <child>
-                      <object class="GtkLabel" id="baseline_label">
-                        <property name="label">基准行（高 40px，水平随下方同步滚动）</property>
-                        <property name="xalign">0</property>
-                      </object>
-                    </child>
+              <object class="AdwViewStackPage">
+                <property name="name">album</property>
+                <property name="title">相册</property>
+                <property name="icon-name">view-grid-symbolic</property>
+                <property name="child">
+                  <object class="GtkBox" id="album_holder">
+                    <property name="orientation">vertical</property>
+                    <property name="hexpand">true</property>
+                    <property name="vexpand">true</property>
                   </object>
-                </child>
+                </property>
               </object>
             </child>
 
-            <!-- (2) 数据列表：虚拟列表，独立接管水平/垂直滚动 -->
+            <!-- ── 页 2：进度轴 + 轨道 ────────────────────────────── -->
             <child>
-              <object class="GtkScrolledWindow" id="body_scroller">
-                <property name="hscrollbar-policy">automatic</property>
-                <property name="vscrollbar-policy">automatic</property>
-                <property name="vexpand">true</property>
-                <child>
-                  <object class="GtkListView" id="data_list">
-                    <property name="show-separators">true</property>
-                    <property name="single-click-activate">false</property>
-                    <property name="css-classes">flat-rows</property>
-                    <property name="model">
-                      <object class="GtkNoSelection" id="data_selection"/>
-                    </property>
-                    <property name="factory">
-                      <object class="GtkBuilderListItemFactory">
-                        <property name="resource">/com/github/notework/row.ui</property>
+              <object class="AdwViewStackPage">
+                <property name="name">timeline</property>
+                <property name="title">进度轴</property>
+                <property name="icon-name">media-playback-start-symbolic</property>
+                <property name="child">
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+                    <property name="hexpand">true</property>
+                    <property name="vexpand">true</property>
+
+                    <!-- (1) 进度轴行：左侧 sidebar 占位 + 右侧进度轴（与下方轨道列右侧起点对齐） -->
+                    <child>
+                      <object class="GtkBox">
+                        <property name="orientation">horizontal</property>
+                        <child>
+                          <object class="GtkBox" id="sidebar_header">
+                            <property name="width-request">160</property>
+                            <property name="orientation">horizontal</property>
+                            <property name="hexpand">false</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkScrolledWindow" id="header_scroller">
+                            <property name="hscrollbar-policy">external</property>
+                            <property name="vscrollbar-policy">never</property>
+                            <property name="propagate-natural-height">true</property>
+                            <property name="hexpand">true</property>
+                            <child>
+                              <object class="GtkDrawingArea" id="progress_axis_canvas">
+                                <property name="height-request">60</property>
+                                <property name="css-classes">progress-axis</property>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
                       </object>
-                    </property>
+                    </child>
+
+                    <!-- (2) 轨道工具条：顶部小工具栏，提供「+ 新建轨道」入口 -->
+                    <child>
+                      <object class="GtkBox" id="track_toolbar">
+                        <property name="orientation">horizontal</property>
+                        <property name="margin-start">12</property>
+                        <property name="margin-end">12</property>
+                        <property name="margin-top">2</property>
+                        <property name="margin-bottom">0</property>
+                        <property name="spacing">6</property>
+                        <child>
+                          <object class="GtkButton" id="track_add_button">
+                            <property name="icon-name">list-add-symbolic</property>
+                            <property name="tooltip-text">新建轨道</property>
+                            <property name="halign">start</property>
+                            <style>
+                              <class name="flat"/>
+                            </style>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+
+                    <!-- (3) 内容行：左侧 sidebar (名称+删除) + 右侧轨道 bar（水平滚动） -->
+                    <child>
+                      <object class="GtkBox">
+                        <property name="orientation">horizontal</property>
+                        <property name="vexpand">true</property>
+                        <child>
+                          <object class="GtkScrolledWindow" id="sidebar_scroller">
+                            <property name="hscrollbar-policy">never</property>
+                            <property name="vscrollbar-policy">external</property>
+                            <property name="width-request">160</property>
+                            <property name="hexpand">false</property>
+                            <property name="vexpand">true</property>
+                            <child>
+                              <object class="GtkBox" id="sidebar_container">
+                                <property name="orientation">vertical</property>
+                                <property name="margin-top">4</property>
+                                <property name="margin-bottom">4</property>
+                                <property name="spacing">2</property>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkScrolledWindow" id="body_scroller">
+                            <property name="hscrollbar-policy">always</property>
+                            <property name="vscrollbar-policy">automatic</property>
+                            <property name="hexpand">true</property>
+                            <property name="vexpand">true</property>
+                            <child>
+                              <object class="GtkBox" id="track_container">
+                                <property name="orientation">vertical</property>
+                                <property name="margin-top">4</property>
+                                <property name="margin-bottom">4</property>
+                                <property name="spacing">2</property>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+
                   </object>
-                </child>
+                </property>
               </object>
             </child>
 

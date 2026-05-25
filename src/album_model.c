@@ -12,10 +12,18 @@ static void album_page_clear(AlbumPage *p) {
     g_free(p->title);   p->title   = NULL;
 }
 
+static void album_track_clear(Track *t) {
+    if (!t) return;
+    g_free(t->name); t->name = NULL;
+    if (t->pairs) { g_array_free(t->pairs, TRUE); t->pairs = NULL; }
+}
+
 Album *album_new(void) {
     Album *a = g_new0(Album, 1);
     a->pages  = g_array_new(FALSE, FALSE, sizeof(AlbumPage));
     a->active = -1;
+    /* 轨道集合：默认空。轨道由用户在 UI 中显式创建。 */
+    a->tracks = g_array_new(FALSE, FALSE, sizeof(Track));
     return a;
 }
 
@@ -24,6 +32,11 @@ void album_free(Album *a) {
     for (guint i = 0; i < a->pages->len; i++)
         album_page_clear(&g_array_index(a->pages, AlbumPage, i));
     g_array_free(a->pages, TRUE);
+    if (a->tracks) {
+        for (guint i = 0; i < a->tracks->len; i++)
+            album_track_clear(&g_array_index(a->tracks, Track, i));
+        g_array_free(a->tracks, TRUE);
+    }
     g_free(a);
 }
 
@@ -95,4 +108,82 @@ void album_set_active(Album *a, int idx) {
     if (!a) return;
     if (idx < 0 || idx >= (int)a->pages->len) return;
     a->active = idx;
+}
+
+/* 本期返回一个静态快照型 GtkStringList：按创建时 album->tracks
+ * 的名称填充。后期增加轨道 CRUD 后，需要用自定义 GListModel
+ * 实现动态增删与项目修改通知。 */
+GListModel *album_create_track_model(Album *a) {
+    GtkStringList *m = gtk_string_list_new(NULL);
+    if (!a || !a->tracks) return G_LIST_MODEL(m);
+    for (guint i = 0; i < a->tracks->len; i++) {
+        const Track *t = &g_array_index(a->tracks, Track, i);
+        gtk_string_list_append(m, t->name ? t->name : "");
+    }
+    return G_LIST_MODEL(m);
+}
+
+int album_track_append(Album *a, const char *name) {
+    g_return_val_if_fail(a && a->tracks, -1);
+    Track t = { .name = NULL, .pairs = NULL };
+    if (name && *name) {
+        t.name = g_strdup(name);
+    } else {
+        t.name = g_strdup_printf("轨道 %u", a->tracks->len + 1);
+    }
+    t.pairs = g_array_new(FALSE, FALSE, sizeof(HandlePair));
+    g_array_append_val(a->tracks, t);
+    return (int)a->tracks->len - 1;
+}
+
+gboolean album_track_remove(Album *a, int idx) {
+    g_return_val_if_fail(a && a->tracks, FALSE);
+    if (idx < 0 || (guint)idx >= a->tracks->len) return FALSE;
+    Track *t = &g_array_index(a->tracks, Track, (guint)idx);
+    album_track_clear(t);
+    g_array_remove_index(a->tracks, (guint)idx);
+    return TRUE;
+}
+
+/* ─── 轨道把手对 ───────────────────────────────── */
+
+static Track *album_track_at(Album *a, int idx) {
+    if (!a || !a->tracks) return NULL;
+    if (idx < 0 || (guint)idx >= a->tracks->len) return NULL;
+    return &g_array_index(a->tracks, Track, (guint)idx);
+}
+
+static inline void normalize_pair(double *a, double *b) {
+    if (*a > *b) { double t = *a; *a = *b; *b = t; }
+}
+
+int album_track_add_pair(Album *a, int track_idx,
+                         double a_arc, double b_arc) {
+    Track *t = album_track_at(a, track_idx);
+    if (!t) return -1;
+    if (!t->pairs) t->pairs = g_array_new(FALSE, FALSE, sizeof(HandlePair));
+    normalize_pair(&a_arc, &b_arc);
+    HandlePair p = { .a_arc = a_arc, .b_arc = b_arc };
+    g_array_append_val(t->pairs, p);
+    return (int)t->pairs->len - 1;
+}
+
+gboolean album_track_remove_pair(Album *a, int track_idx, int pair_idx) {
+    Track *t = album_track_at(a, track_idx);
+    if (!t || !t->pairs) return FALSE;
+    if (pair_idx < 0 || (guint)pair_idx >= t->pairs->len) return FALSE;
+    g_array_remove_index(t->pairs, (guint)pair_idx);
+    return TRUE;
+}
+
+gboolean album_track_update_pair(Album *a, int track_idx, int pair_idx,
+                                 double a_arc, double b_arc) {
+    Track *t = album_track_at(a, track_idx);
+    if (!t || !t->pairs) return FALSE;
+    if (pair_idx < 0 || (guint)pair_idx >= t->pairs->len) return FALSE;
+    normalize_pair(&a_arc, &b_arc);
+    HandlePair *p = &g_array_index(t->pairs, HandlePair, (guint)pair_idx);
+    p->a_arc = a_arc;
+    p->b_arc = b_arc;
+    return TRUE;
 }

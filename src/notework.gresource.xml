@@ -1,12 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   notework.gresource.xml — GResource 清单
-  将 UI XML 嵌入到可执行文件中，运行时无需读取磁盘文件
+  将 UI XML 嵌入到可执行文件中，运行时无需读取磁盘文件。
+
+  prefix 分组：
+  · /com/github/notework        ：主程序自身的资源（窗口、样式、轨道行模板）
+  · /com/github/notework/album  ：相册模块 UI（与 album 独立可执行复用同一份）
+  · /com/github/notework/doodle ：涂鸦窗口 UI（被 album 模块调用）
 -->
 <gresources>
   <gresource prefix="/com/github/notework">
     <file preprocess="xml-stripblanks">window.ui</file>
     <file preprocess="xml-stripblanks">row.ui</file>
+    <file preprocess="xml-stripblanks">track_row.ui</file>
     <file>style.css</file>
+  </gresource>
+  <gresource prefix="/com/github/notework/album">
+    <file preprocess="xml-stripblanks">album_window.ui</file>
+  </gresource>
+  <gresource prefix="/com/github/notework/doodle">
+    <file preprocess="xml-stripblanks">doodle_window.ui</file>
   </gresource>
 </gresources>

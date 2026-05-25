@@ -27,7 +27,35 @@ typedef struct {
 typedef struct {
     GArray *pages;        /* AlbumPage（按值存储） */
     int     active;       /* 当前选中页下标；空相册时为 -1 */
+    GArray *tracks;       /* Track（按值存储）。本期仅骨架，后期演进为
+                           * 全局轨道集合：跨页面聅合高亮区域 + 起止指针对。 */
 } Album;
+
+/* 一对把手 = 一段「激活区域」。a_arc/b_arc 为全局弧长（贯穿
+ * 整本相册的弧长域，0..total_arc）。约定 a_arc <= b_arc。 */
+typedef struct {
+    double a_arc;
+    double b_arc;
+} HandlePair;
+
+/* 轨道：名称 + 0..N 对把手。每对把手在轨道行上以两个三角把手 +
+ * 半透明色块表达，色块横贯进度轴宽度（与轴坐标系对齐）。 */
+typedef struct {
+    char   *name;
+    GArray *pairs;   /* HandlePair（按值存储）；可能为空 */
+} Track;
+
+/* 轨道把手对增删 / 修改。本期仅在内存中管理，无持久化。
+ *   · album_track_add_pair: 在 track_idx 末尾追加一对，返回 pair 下标；
+ *     越界返回 -1。a/b 顺序自动归一。
+ *   · album_track_remove_pair: 越界返回 FALSE。
+ *   · album_track_update_pair: 用于拖动结束后写回；越界返回 FALSE，
+ *     a/b 顺序自动归一。 */
+int       album_track_add_pair   (Album *a, int track_idx,
+                                  double a_arc, double b_arc);
+gboolean  album_track_remove_pair(Album *a, int track_idx, int pair_idx);
+gboolean  album_track_update_pair(Album *a, int track_idx, int pair_idx,
+                                  double a_arc, double b_arc);
 
 Album    *album_new(void);
 void      album_free(Album *a);
@@ -82,5 +110,28 @@ cairo_surface_t **album_load_pdf_surfaces(GFile *file, int *out_n,
 /* ─── 主窗口 ───────────────────────────────────────────────────── */
 
 GtkWidget *album_window_new(void);
+
+/* 内嵌视图：返回一个 GtkBox，包含完整的相册编辑 UI
+ * （工具条 + 页缩略图 + 预览 + 图层面板）。
+ * album 由调用方拥有且生命周期不短于该视图。 */
+GtkWidget *album_view_new(Album *album);
+
+/* 轨道列表的 GListModel：本期返回基于 album->tracks 的 GtkStringList
+ * （仅名称字段）。后期会替换为自定义 GListModel。 */
+GListModel *album_create_track_model(Album *a);
+
+/* 轨道增删。调用后调用方需自行触发样式刷新（例如重装填轨道行）。
+ *   · album_track_append: name 为 NULL 时使用默认名 "轨道 N"，
+ *     N = 当前 tracks->len + 1；返回新轨道下标（追加于末尾）。
+ *   · album_track_remove: 下标越界返回 FALSE。 */
+int       album_track_append(Album *a, const char *name);
+gboolean  album_track_remove(Album *a, int idx);
+
+/* 变更通知：相册内容发生变动（页增删、涂鸦修改、高亮增删、
+ * 图层变动等）后被调用；view 为 album_view_new()/album_window_new() 返回
+ * 的控件。多次 set 会覆盖上一次；cb=NULL 取消。 */
+typedef void (*AlbumChangedFn)(GtkWidget *album_view, gpointer user_data);
+void album_view_set_changed_cb(GtkWidget *album_view,
+                                AlbumChangedFn cb, gpointer user_data);
 
 G_END_DECLS

@@ -30,7 +30,7 @@
     <property name="content">
       <object class="AdwToolbarView">
         <child type="top">
-          <object class="AdwHeaderBar">
+          <object class="AdwHeaderBar" id="album_headerbar">
             <child type="start">
               <object class="GtkBox">
                 <property name="spacing">4</property>
@@ -153,11 +153,11 @@
             <property name="end-child">
               <object class="GtkPaned" id="inner_paned">
                 <property name="orientation">horizontal</property>
-                <property name="position">920</property>
+                <property name="position">600</property>
                 <property name="resize-start-child">true</property>
                 <property name="resize-end-child">false</property>
                 <property name="shrink-start-child">true</property>
-                <property name="shrink-end-child">true</property>
+                <property name="shrink-end-child">false</property>
 
                 <!-- 中：当前页预览 + 状态信息栏（随窗口拉宽同步扩充） -->
                 <property name="start-child">
@@ -206,7 +206,7 @@
                     <property name="margin-top">10</property>
                     <property name="margin-bottom">10</property>
                     <property name="spacing">8</property>
-                    <property name="width-request">50</property>
+                    <property name="width-request">200</property>
 
                     <child>
                       <object class="GtkLabel">

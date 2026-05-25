@@ -59,6 +59,9 @@ typedef struct {
     gboolean has_pointer;
     DPoint   pointer_pos;
 
+    /* 拖动时高亮跟随 */
+    double drag_prev_ox, drag_prev_oy;
+
     /* 高亮工具状态 */
     double           hl_global_width;          /* 全局默认 width */
     gboolean         hl_drawing;
@@ -233,17 +236,17 @@ static double project_pt_seg(double px, double py,
     return hypot(px - tx, py - ty);
 }
 
-/* 把 (px,py) 投影到带偏移的 LINE/PATH 宿主上，返回最小距离与对应投影点。
- * hint_seg: PATH 段提示（-1 表示无，全局搜）； out_seg: 本次选中的段下标。
- * 当 hint_seg 有效时，仅在 [hint-W, hint+W] 范围内搜索，防止在大弧度曲线上跨段跨跳。 */
-static double dist_pt_to_host_seg(const Shape *s, double px, double py,
-                                  int hint_seg,
-                                  double *qx, double *qy, int *out_seg) {
+/* 计算点 (px,py) 到 LINE/PATH 在指定偏移 (off_x,off_y) 处的距离。
+ * hint_seg: PATH 段提示（-1 表示无，全局搜）； out_seg: 本次选中段下标。
+ * 当 hint_seg 有效时，仅在 [hint-W, hint+W] 范围内搜索，防止跨段跳跃。 */
+static double dist_to_host_at_offset(const Shape *s, double off_x, double off_y,
+                                     double px, double py, int hint_seg,
+                                     double *qx, double *qy, int *out_seg) {
     if (s->kind == SHAPE_LINE) {
         if (out_seg) *out_seg = 0;
         return project_pt_seg(px, py,
-            s->u.line.a.x + s->dx, s->u.line.a.y + s->dy,
-            s->u.line.b.x + s->dx, s->u.line.b.y + s->dy,
+            s->u.line.a.x + off_x, s->u.line.a.y + off_y,
+            s->u.line.b.x + off_x, s->u.line.b.y + off_y,
             qx, qy);
     } else if (s->kind == SHAPE_PATH) {
         if (s->u.path.n < 2) return 1e18;
@@ -259,8 +262,8 @@ static double dist_pt_to_host_seg(const Shape *s, double px, double py,
         for (int i = lo; i <= hi; i++) {
             double tx, ty;
             double d = project_pt_seg(px, py,
-                s->u.path.pt[i  ].x + s->dx, s->u.path.pt[i  ].y + s->dy,
-                s->u.path.pt[i+1].x + s->dx, s->u.path.pt[i+1].y + s->dy,
+                s->u.path.pt[i  ].x + off_x, s->u.path.pt[i  ].y + off_y,
+                s->u.path.pt[i+1].x + off_x, s->u.path.pt[i+1].y + off_y,
                 &tx, &ty);
             if (d < bestd) { bestd = d; bx = tx; by = ty; best_seg = i; }
         }
@@ -272,13 +275,21 @@ static double dist_pt_to_host_seg(const Shape *s, double px, double py,
     return 1e18;
 }
 
+/* 便捷包装：使用 shape 自身的 dx/dy 作为偏移 */
+static double dist_pt_to_host_seg(const Shape *s, double px, double py,
+                                  int hint_seg,
+                                  double *qx, double *qy, int *out_seg) {
+    return dist_to_host_at_offset(s, s->dx, s->dy, px, py,
+                                  hint_seg, qx, qy, out_seg);
+}
+
 /* 把 (px,py) 投影到带偏移的 LINE/PATH 宿主上（全局搜）。 */
 static double dist_pt_to_host(const Shape *s, double px, double py,
                               double *qx, double *qy) {
     return dist_pt_to_host_seg(s, px, py, -1, qx, qy, NULL);
 }
 
-/* 在所有可见的 LAYER_DOODLE 中找最近的 LINE/PATH 宿主。 */
+/* 在所有可见的 LAYER_DOODLE 中找最近的 LINE/PATH 宿主（含阵列子项）。 */
 static double find_snap_host(DoodleDoc *doc, double px, double py,
                               int *out_layer_idx, int *out_shape_number,
                               double *out_qx, double *out_qy) {
@@ -292,12 +303,35 @@ static double find_snap_host(DoodleDoc *doc, double px, double py,
         ShapeStore *st = &L->store;
         for (gsize i = 0; i < st->n; i++) {
             Shape *s = st->items[i];
-            if (s->kind != SHAPE_LINE && s->kind != SHAPE_PATH) continue;
-            double tx, ty;
-            double d = dist_pt_to_host(s, px, py, &tx, &ty);
-            if (d < bestd) {
-                bestd = d; bli = li; bnum = s->number;
-                bqx = tx; bqy = ty;
+            if (s->kind == SHAPE_LINE || s->kind == SHAPE_PATH) {
+                double tx, ty;
+                double d = dist_pt_to_host(s, px, py, &tx, &ty);
+                if (d < bestd) {
+                    bestd = d; bli = li; bnum = s->number;
+                    bqx = tx; bqy = ty;
+                }
+            } else if (s->kind == SHAPE_ARRAY) {
+                /* 穿透阵列外壳，遍历每个子项的画布位置 */
+                int rows = s->u.arr.rows, cols = s->u.arr.cols;
+                int nb = s->u.arr.n_bases;
+                for (int r = 0; r < rows; r++)
+                    for (int c = 0; c < cols; c++)
+                        for (int b = 0; b < nb; b++) {
+                            Shape *base = s->u.arr.bases[b];
+                            if (base->kind != SHAPE_LINE &&
+                                base->kind != SHAPE_PATH) continue;
+                            double edx = s->dx + c * s->u.arr.gap_x + base->dx;
+                            double edy = s->dy + r * s->u.arr.gap_y + base->dy;
+                            double tx, ty;
+                            double d = dist_to_host_at_offset(
+                                base, edx, edy, px, py, -1, &tx, &ty, NULL);
+                            if (d < bestd) {
+                                int slot = (r * cols + c) * nb + b;
+                                bestd = d; bli = li;
+                                bnum = s->u.arr.child_numbers[slot];
+                                bqx = tx; bqy = ty;
+                            }
+                        }
             }
         }
     }
@@ -309,7 +343,8 @@ static double find_snap_host(DoodleDoc *doc, double px, double py,
 }
 
 /* 给定锁定的宿主标识，把鼠标位置投影到该宿主上。失败返回 FALSE。
- * seg_io: 可传 NULL；非 NULL 时作为 in/out 段提示，锁段防高亮脱轨。 */
+ * seg_io: 可传 NULL；非 NULL 时作为 in/out 段提示，锁段防高亮脱轨。
+ * 支持独立 LINE/PATH 及阵列子项。 */
 static gboolean project_to_host(DoodleDoc *doc,
                                 int host_layer_idx, int host_shape_number,
                                 double px, double py,
@@ -322,13 +357,37 @@ static gboolean project_to_host(DoodleDoc *doc,
     ShapeStore *st = &L->store;
     for (gsize i = 0; i < st->n; i++) {
         Shape *s = st->items[i];
-        if (s->number != host_shape_number) continue;
-        if (s->kind != SHAPE_LINE && s->kind != SHAPE_PATH) return FALSE;
-        int hint = (seg_io ? *seg_io : -1);
-        int out_seg = -1;
-        dist_pt_to_host_seg(s, px, py, hint, qx, qy, &out_seg);
-        if (seg_io) *seg_io = out_seg;
-        return TRUE;
+        if (s->kind == SHAPE_LINE || s->kind == SHAPE_PATH) {
+            if (s->number != host_shape_number) continue;
+            int hint = (seg_io ? *seg_io : -1);
+            int out_seg = -1;
+            dist_to_host_at_offset(s, s->dx, s->dy, px, py,
+                                   hint, qx, qy, &out_seg);
+            if (seg_io) *seg_io = out_seg;
+            return TRUE;
+        } else if (s->kind == SHAPE_ARRAY) {
+            /* 在阵列子项中按编号查找 */
+            int rows = s->u.arr.rows, cols = s->u.arr.cols;
+            int nb = s->u.arr.n_bases;
+            for (int r = 0; r < rows; r++)
+                for (int c = 0; c < cols; c++)
+                    for (int b = 0; b < nb; b++) {
+                        int slot = (r * cols + c) * nb + b;
+                        if (s->u.arr.child_numbers[slot] != host_shape_number)
+                            continue;
+                        Shape *base = s->u.arr.bases[b];
+                        if (base->kind != SHAPE_LINE &&
+                            base->kind != SHAPE_PATH) return FALSE;
+                        double edx = s->dx + c * s->u.arr.gap_x + base->dx;
+                        double edy = s->dy + r * s->u.arr.gap_y + base->dy;
+                        int hint = (seg_io ? *seg_io : -1);
+                        int out_seg = -1;
+                        dist_to_host_at_offset(base, edx, edy, px, py,
+                                               hint, qx, qy, &out_seg);
+                        if (seg_io) *seg_io = out_seg;
+                        return TRUE;
+                    }
+        }
     }
     return FALSE;
 }
@@ -1051,6 +1110,8 @@ static void on_drag_begin(GtkGestureDrag *g, double sx, double sy,
                 }
                 /* 准备拖动整组 */
                 c->drag_moving = TRUE;
+                c->drag_prev_ox = 0.0;
+                c->drag_prev_oy = 0.0;
                 g_array_set_size(c->sel_origs, 0);
                 ShapeStore *st = doc_active_store(c->doc);
                 if (c->selected_idx >= 0 &&
@@ -1148,6 +1209,38 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
                     ss->dy = so->dy0 + oy;
                 }
             }
+            /* 高亮跟随：偏移所有引用被移动图形的高亮记录 */
+            double hdx = ox - c->drag_prev_ox;
+            double hdy = oy - c->drag_prev_oy;
+            if (hdx != 0.0 || hdy != 0.0) {
+                int ali = c->doc->active_layer;
+                int hl_li = doc_find_top_highlight_layer(c->doc);
+                if (hl_li >= 0) {
+                    Layer *HL = &g_array_index(c->doc->layers, Layer, hl_li);
+                    if (HL->highlights) {
+                        for (guint hi = 0; hi < HL->highlights->len; hi++) {
+                            HighlightRecord *hr = g_ptr_array_index(HL->highlights, hi);
+                            if (hr->host_layer_idx != ali) continue;
+                            /* 检查该记录的宿主是否在被移动的图形集合中 */
+                            gboolean is_moved = FALSE;
+                            for (guint k2 = 0; k2 < c->sel_origs->len; k2++) {
+                                SelOrig *so2 = &g_array_index(c->sel_origs, SelOrig, k2);
+                                if ((gsize)so2->idx < st->n &&
+                                    st->items[so2->idx]->number == hr->host_shape_number) {
+                                    is_moved = TRUE; break;
+                                }
+                            }
+                            if (!is_moved) continue;
+                            for (gsize pi = 0; pi < hr->n; pi++) {
+                                hr->pt[pi].x += hdx;
+                                hr->pt[pi].y += hdy;
+                            }
+                        }
+                    }
+                }
+            }
+            c->drag_prev_ox = ox;
+            c->drag_prev_oy = oy;
             gtk_widget_queue_draw(c->area);
         }
         break;

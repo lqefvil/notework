@@ -26,8 +26,19 @@ resources = gnome.compile_resources(
 
 # 可执行文件
 executable('notework',
-  sources : ['src/main.c', resources],
-  dependencies : [gtk4_dep, adw_dep],
+  sources : [
+    'src/main.c',
+    'src/progress_axis.c',
+    'src/track_row.c',
+    'src/album_window.c',
+    'src/album_model.c',
+    'src/album_importer.c',
+    'src/doodle_window.c',
+    'src/doodle_canvas.c',
+    'src/doodle_model.c',
+    resources,
+  ],
+  dependencies : [gtk4_dep, adw_dep, m_dep, poppler_dep],
   install : true,
 )
 

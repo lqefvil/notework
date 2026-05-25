@@ -10,6 +10,7 @@
  *     层显示提示。
  */
 #include "doodle.h"
+#include <math.h>
 #include <string.h>
 
 /* ─── Shape 构造/释放 ───────────────────────────────────────────── */
@@ -94,6 +95,47 @@ void shape_free(Shape *s) {
         break;
     }
     g_free(s);
+}
+
+/* ─── 弧长（进度轴）─────────────────────────────────────────── */
+
+double shape_arc_length(const Shape *s) {
+    if (!s) return 0.0;
+    switch (s->kind) {
+    case SHAPE_LINE: {
+        double dx = s->u.line.b.x - s->u.line.a.x;
+        double dy = s->u.line.b.y - s->u.line.a.y;
+        return sqrt(dx * dx + dy * dy);
+    }
+    case SHAPE_PATH: {
+        if (s->u.path.n < 2) return 0.0;
+        double sum = 0.0;
+        const DPoint *p = s->u.path.pt;
+        for (gsize i = 1; i < s->u.path.n; i++) {
+            double dx = p[i].x - p[i - 1].x;
+            double dy = p[i].y - p[i - 1].y;
+            sum += sqrt(dx * dx + dy * dy);
+        }
+        return sum;
+    }
+    case SHAPE_ARRAY:
+    default:
+        /* 本期不计入阵列组；需要时可录制其展开后的子形状。 */
+        return 0.0;
+    }
+}
+
+double doodle_doc_total_arc(const DoodleDoc *doc) {
+    if (!doc || !doc->layers) return 0.0;
+    double sum = 0.0;
+    for (guint i = 0; i < doc->layers->len; i++) {
+        const Layer *L = &g_array_index(doc->layers, Layer, i);
+        if (L->kind != LAYER_DOODLE) continue;
+        if (!L->visible) continue;
+        for (gsize k = 0; k < L->store.n; k++)
+            sum += shape_arc_length(L->store.items[k]);
+    }
+    return sum;
 }
 
 /* ─── ShapeStore ────────────────────────────────────────────────── */
