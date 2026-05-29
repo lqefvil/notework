@@ -16,21 +16,26 @@ G_BEGIN_DECLS
 /* ─── 数据模型 ─────────────────────────────────────────────────── */
 
 typedef enum {
-    SHAPE_LINE,   /* 直线 */
-    SHAPE_PATH,   /* 手绘路径 */
-    SHAPE_ARRAY   /* 阵列组（整体选/拖/删，子项各占编号） */
+    SHAPE_LINE,    /* 直线 */
+    SHAPE_PATH,    /* 手绘路径 */
+    SHAPE_ARRAY,   /* 阵列组（整体选/拖/删，子项各占编号） */
+    SHAPE_RECT,    /* 矩形：a/b 为对角线两点；仅描边，不参与编号体系（仅出现在 paint 层） */
+    SHAPE_ELLIPSE  /* 椭圆：a/b 为外接矩形对角；仅描边，不参与编号体系（仅出现在 paint 层） */
 } ShapeKind;
 
 typedef struct { double x, y; } DPoint;
+typedef struct { double r, g, b, a; } DRGBA;
 
 typedef struct Shape Shape;
 struct Shape {
     ShapeKind kind;
     int       number;   /* 全局编号（1..N）。SHAPE_ARRAY 顶层未使用 */
     double    dx, dy;   /* 累积平移；阵列组用同一对偏移整组移动 */
+    DRGBA     color;    /* 笔色（仅 LINE/PATH/RECT/ELLIPSE 使用；ARRAY 顶层未使用） */
     union {
         struct { DPoint a, b; } line;
         struct { DPoint *pt; gsize n, cap; } path;
+        struct { DPoint a, b; } box;   /* RECT 与 ELLIPSE 共用：a/b 为对角线两点 */
         struct {
             Shape **bases;           /* n_bases 个基准（克隆），保留各自 dx/dy 维持相对位置 */
             int     n_bases;
@@ -58,6 +63,7 @@ typedef enum {
  * host_shape_number 是该层中宿主图形（LINE 或 PATH）的稳定全局编号。
  * 整条记录共用一个 width。 */
 typedef struct {
+    guint64 id;                 /* 全局单调递增唯一标识，用于跨会话稳定绑定 */
     int     host_layer_idx;
     int     host_shape_number;
     double  width;
@@ -70,6 +76,11 @@ typedef struct {
     gboolean   visible;
     char      *name;
     ShapeStore store;            /* 仅 LAYER_DOODLE 有效 */
+
+    /* 仅 LAYER_DOODLE 有效；TRUE 表示这是「绘画层」（paint），
+     * 其内的 shapes 不参与路径编号体系，也不计入进度轴弧长聚合。
+     * 视觉上居于 doodle 路径线条之下，作为图像内容的延伸。 */
+    gboolean   is_paint;
 
     /* 仅 LAYER_IMAGE_STUB 有效；surface 为 NULL 时退化为占位 */
     cairo_surface_t *surface;
@@ -91,6 +102,8 @@ typedef struct {
 Shape *shape_new_line(DPoint a, DPoint b);
 Shape *shape_new_path(void);
 void   shape_path_add_point(Shape *s, DPoint p);
+Shape *shape_new_rect(DPoint a, DPoint b);     /* a/b 为对角线两点 */
+Shape *shape_new_ellipse(DPoint a, DPoint b);  /* a/b 为外接矩形对角 */
 Shape *shape_clone(const Shape *s);
 void   shape_free(Shape *s);
 
@@ -98,8 +111,9 @@ void   shape_free(Shape *s);
  * SHAPE_LINE: 两点欧氏距离
  * SHAPE_PATH: 相邻点距离累加
  * SHAPE_ARRAY: 0（本期不参与进度轴聚合，避免与组内副本编号体系混淆）
+ * SHAPE_RECT/SHAPE_ELLIPSE: 0（仅出现在 paint 层，视为图像延伸不计入路径弧长）
  * doodle_doc_total_arc: 遍历 doc 内所有 LAYER_DOODLE 层，对其每个 shape
- *   调用 shape_arc_length 求和；不计入隐藏图层。 */
+ *   调用 shape_arc_length 求和；不计入隐藏图层；自动跳过 is_paint 层。 */
 double shape_arc_length(const Shape *s);
 double doodle_doc_total_arc(const DoodleDoc *doc);
 
@@ -154,6 +168,7 @@ void doc_insert_image_layer_below_active(DoodleDoc *doc,
 Layer  layer_new_doodle_value(const char *name);
 Layer  layer_new_image_value (cairo_surface_t *surface, const char *name);
 Layer  layer_new_highlight_value(const char *name);
+Layer  layer_new_paint_value(const char *name);  /* 绘画层：is_paint=TRUE，置于 doodle 之下、image 之上 */
 Layer  layer_clone_value     (const Layer *src);
 void   layer_free_contents   (Layer *l);
 
@@ -170,6 +185,22 @@ HighlightRecord *highlight_record_clone(const HighlightRecord *src);
 int  doc_find_top_highlight_layer (const DoodleDoc *doc);
 int  doc_ensure_top_highlight_layer(DoodleDoc *doc);
 int  doc_find_top_doodle_layer    (const DoodleDoc *doc);
+
+/* paint 层：is_paint=TRUE 的 LAYER_DOODLE。
+ * doc_find_top_paint_layer：若不存在返回 -1。
+ * doc_ensure_top_paint_layer：若不存在则在最顶部 doodle 层下方插入一个新的；
+ *   返回该 paint 层在 doc->layers 中的下标。 */
+int  doc_find_top_paint_layer    (const DoodleDoc *doc);
+int  doc_ensure_top_paint_layer  (DoodleDoc *doc);
+
+/* 把 shape 加入 paint 层（不分配编号；其 number 字段保持 0）。
+ * 调用方需保证 layer_idx 指向 is_paint 层。 */
+void doc_add_shape_to_paint_layer(DoodleDoc *doc, int layer_idx, Shape *s);
+
+/* 通用：删除指定图层 store 中的第 idx 个 shape（适用于 paint 层与 doodle 层）。
+ * 如果是 doodle 路径层（!is_paint），会按现有规则 shift 编号；
+ * 如果是 paint 层（is_paint），仅释放并移除，不动编号。 */
+void doc_remove_shape_at_layer(DoodleDoc *doc, int layer_idx, gsize idx);
 
 /* 文档：图层增删改查（以 Layer 值拷贝交付所有权） */
 void   doc_insert_layer_at(DoodleDoc *doc, int pos, Layer src_value);
@@ -191,9 +222,12 @@ gboolean doc_has_duplicate_numbers(const DoodleDoc *doc);
 typedef enum {
     TOOL_LINE,
     TOOL_PATH,
+    TOOL_RECT,        /* 矩形（仅作用于 paint 层） */
+    TOOL_ELLIPSE,     /* 椭圆（仅作用于 paint 层） */
     TOOL_ERASE,
     TOOL_SELECT,
-    TOOL_HIGHLIGHT
+    TOOL_HIGHLIGHT,
+    TOOL_HL_ERASE
 } Tool;
 
 typedef void (*DoodleChangedFn)(GtkWidget *canvas, gpointer user_data);
@@ -202,6 +236,17 @@ GtkWidget *doodle_canvas_new(DoodleDoc *doc);
 DoodleDoc *doodle_canvas_get_doc(GtkWidget *w);
 void       doodle_canvas_set_tool(GtkWidget *w, Tool t);
 Tool       doodle_canvas_get_tool(GtkWidget *w);
+
+/* 绘画目标开关：TRUE 时 LINE/PATH/RECT/ELLIPSE 工具新建的形状落到 paint 层
+ *（不存在则自动创建）；FALSE 时 LINE/PATH 落到 doodle 路径层。
+ * RECT/ELLIPSE 工具被选中时会强制 paint 目标为 TRUE。 */
+void       doodle_canvas_set_paint_target(GtkWidget *w, gboolean to_paint);
+gboolean   doodle_canvas_get_paint_target(GtkWidget *w);
+
+/* 全局笔色：仅作用于此后新绘制的图形（已存在图形保持原色）。
+ * 默认 {0,0,0,1}（黑色不透明）。 */
+void       doodle_canvas_set_global_pen_color(GtkWidget *w, DRGBA c);
+DRGBA      doodle_canvas_get_global_pen_color(GtkWidget *w);
 
 int        doodle_canvas_get_selected_index(GtkWidget *w); /* -1: none */
 void       doodle_canvas_set_selected_index(GtkWidget *w, int idx);

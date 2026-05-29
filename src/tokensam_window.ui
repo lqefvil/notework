@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  tokensam_window.ui — Token 级 SAM 可视化窗口骨架
+  结构：
+    AdwApplicationWindow#twin
+    └── AdwToolbarView
+        ├── [top] AdwHeaderBar          ← 标题/构建按钮/suffix link 开关
+        └── [content] GtkPaned
+            ├── [start] 左栏：词典编辑/分隔符/输入文本
+            └── [end]   右栏：DAG 画布占位 GtkBox#canvas_holder
+-->
+<interface>
+  <requires lib="gtk" version="4.10"/>
+  <requires lib="libadwaita" version="1.0"/>
+
+  <object class="AdwApplicationWindow" id="twin">
+    <property name="title">Notework — Token 级 SAM</property>
+    <property name="default-width">1280</property>
+    <property name="default-height">820</property>
+
+    <property name="content">
+      <object class="AdwToolbarView">
+
+        <!-- 顶部工具栏 -->
+        <child type="top">
+          <object class="AdwHeaderBar">
+            <child type="end">
+              <object class="GtkBox">
+                <property name="spacing">6</property>
+                <property name="margin-end">6</property>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="label">显示后缀链接</property>
+                    <property name="css-classes">dim-label</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkSwitch" id="suffix_link_switch">
+                    <property name="active">false</property>
+                    <property name="tooltip-text">显示/隐藏 suffix link（虚线）</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="build_btn">
+                    <property name="label">构建 SAM</property>
+                    <property name="css-classes">suggested-action</property>
+                    <property name="tooltip-text">按当前词典与分隔符切分输入文本，并构造 SAM 渲染 DAG（清空已有 SAM）</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="append_btn">
+                    <property name="label">追加（GSA）</property>
+                    <property name="tooltip-text">把当前输入追加到现有 SAM 上（GSA 增量构造，多次输入合并为同一张图）</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- 主体：左面板 / 右画布 -->
+        <property name="content">
+          <object class="GtkPaned">
+            <property name="orientation">horizontal</property>
+            <property name="position">420</property>
+            <property name="resize-start-child">false</property>
+            <property name="resize-end-child">true</property>
+            <property name="shrink-start-child">false</property>
+            <property name="shrink-end-child">false</property>
+
+            <!-- 左：词典 + 输入 -->
+            <property name="start-child">
+              <object class="GtkBox">
+                <property name="orientation">vertical</property>
+                <property name="margin-start">10</property>
+                <property name="margin-end">10</property>
+                <property name="margin-top">10</property>
+                <property name="margin-bottom">10</property>
+                <property name="spacing">8</property>
+                <property name="width-request">380</property>
+
+                <!-- 词典编辑 -->
+                <child>
+                  <object class="GtkLabel">
+                    <property name="xalign">0</property>
+                    <property name="label">词典（每行一个 token，最长 50 字符）</property>
+                    <property name="css-classes">heading</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox">
+                    <property name="spacing">6</property>
+                    <child>
+                      <object class="GtkEntry" id="lex_entry">
+                        <property name="hexpand">true</property>
+                        <property name="placeholder-text">输入新 token 后回车或点「添加」</property>
+                        <property name="max-length">50</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="lex_add_btn">
+                        <property name="label">添加</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkScrolledWindow">
+                    <property name="vexpand">true</property>
+                    <property name="hscrollbar-policy">never</property>
+                    <property name="min-content-height">160</property>
+                    <child>
+                      <object class="GtkListBox" id="lex_list">
+                        <property name="selection-mode">multiple</property>
+                        <property name="css-classes">boxed-list</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox">
+                    <property name="spacing">6</property>
+                    <child>
+                      <object class="GtkButton" id="lex_select_all_btn">
+                        <property name="label">全选</property>
+                        <property name="tooltip-text">选中所有 token（Ctrl+A）</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="lex_clear_sel_btn">
+                        <property name="label">清除</property>
+                        <property name="tooltip-text">取消所有选中（Esc）</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="lex_remove_btn">
+                        <property name="label">删除选中</property>
+                        <property name="tooltip-text">删除当前选中的所有 token</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="lex_merge_btn">
+                        <property name="label">合并为同义词</property>
+                        <property name="tooltip-text">将选中的多个 token 归入同一等价类</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="lex_split_btn">
+                        <property name="label">拆为独立类</property>
+                        <property name="tooltip-text">将选中的 token 各自独立成新等价类</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+
+                <child>
+                  <object class="GtkSeparator"/>
+                </child>
+
+                <!-- 切分模式 + 自动入典 -->
+                <child>
+                  <object class="GtkBox">
+                    <property name="spacing">6</property>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">切分模式</property>
+                        <property name="xalign">0</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkDropDown" id="mode_dropdown">
+                        <property name="tooltip-text">按词：按分隔符切；按字：每个 Unicode 字符即一个 token；按词典：按词典最长前缀切，未登录词弹窗确认</property>
+                        <property name="model">
+                          <object class="GtkStringList">
+                            <items>
+                              <item translatable="no">按词切（分隔符）</item>
+                              <item translatable="no">按字切（逐字符）</item>
+                              <item translatable="no">按词典切（最长前缀）</item>
+                            </items>
+                          </object>
+                        </property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkCheckButton" id="autoadd_check">
+                        <property name="label">未识别自动入典</property>
+                        <property name="active">true</property>
+                        <property name="tooltip-text">勾选后输入新 token 时自动加入词典，免去手动「添加」步骤</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+
+                <!-- 分隔符 -->
+                <child>
+                  <object class="GtkBox">
+                    <property name="spacing">6</property>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="label">分隔符</property>
+                        <property name="xalign">0</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkEntry" id="sep_entry">
+                        <property name="hexpand">true</property>
+                        <property name="text"> ，。,.;；!?！？</property>
+                        <property name="tooltip-text">每个字符均视为分隔符候选（任一命中即切）。仅在「按词切」模式下生效。</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+
+                <!-- 输入文本 -->
+                <child>
+                  <object class="GtkLabel">
+                    <property name="xalign">0</property>
+                    <property name="label">输入文本</property>
+                    <property name="css-classes">heading</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkScrolledWindow">
+                    <property name="min-content-height">140</property>
+                    <child>
+                      <object class="GtkTextView" id="input_view">
+                        <property name="monospace">true</property>
+                        <property name="wrap-mode">word-char</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+
+                <!-- 状态栏 -->
+                <child>
+                  <object class="GtkLabel" id="status_label">
+                    <property name="xalign">0</property>
+                    <property name="wrap">true</property>
+                    <property name="wrap-mode">word-char</property>
+                    <property name="label">就绪。</property>
+                    <property name="css-classes">dim-label</property>
+                  </object>
+                </child>
+
+              </object>
+            </property>
+
+            <!-- 右：DAG 画布占位 -->
+            <property name="end-child">
+              <object class="GtkBox" id="canvas_holder">
+                <property name="orientation">vertical</property>
+                <property name="hexpand">true</property>
+                <property name="vexpand">true</property>
+              </object>
+            </property>
+          </object>
+        </property>
+      </object>
+    </property>
+  </object>
+</interface>

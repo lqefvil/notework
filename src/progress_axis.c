@@ -39,6 +39,11 @@ struct ProgressAxis {
     /* 播放头 */
     double            playhead_arc;  /* 当前播放头弧长位置 */
     GtkWidget        *body_container; /* 借用，用于播放头拖动时刷新轨道 */
+
+    /* 高亮突出 / 聚焦（供激活区域联动使用） */
+    GArray           *emph_keys;     /* GArray<ProgressAxisHLKey>；可为 NULL */
+    int               focus_page;    /* 跳转后聚焦的高亮页下标；-1 表示无 */
+    guint64           focus_hl_id;   /* 0 表示无 */
 };
 
 /* ─── 几何辅助 ──────────────────────────────────────────────────── */
@@ -112,8 +117,29 @@ project_point_to_polyline_arc(const DPoint *pts, gsize n_pts, DPoint q)
     return best_arc;
 }
 
+/* 计算折线总弧长（n_pts >= 2）。 */
+static double
+polyline_total_arc(const DPoint *pts, gsize n_pts)
+{
+    if (n_pts < 2) return 0.0;
+    double cum = 0.0;
+    for (gsize i = 1; i < n_pts; i++) {
+        double dx = pts[i].x - pts[i - 1].x;
+        double dy = pts[i].y - pts[i - 1].y;
+        cum += sqrt(dx * dx + dy * dy);
+    }
+    return cum;
+}
+
 /* 计算 HighlightRecord r 在宿主 host 上的弧长区间 (s_arc, e_arc)。
- * 当 host 不是 LINE/PATH 或 r 无足够采样点时返回 FALSE。 */
+ * 当 host 不是 LINE/PATH 或 r 无足够采样点时返回 FALSE。
+ *
+ * 端点吸附（修复相邻路径间高亮间隙）：
+ * 由于采样点首尾不可能精确落在 host 端点上，"涂满"时仍会留出
+ * 数像素的小间隙。本函数对接近端点的投影做贴齐处理：
+ *   · 若 a < SNAP_EPS         → a = 0
+ *   · 若 host_arc - b < SNAP_EPS → b = host_arc
+ * 阈值取 max(r->width * 0.5, 3.0)，覆盖默认笔头的视觉填满范围。 */
 static gboolean
 highlight_record_arc_span(const Shape *host, const HighlightRecord *r,
                           double *out_s, double *out_e)
@@ -123,19 +149,29 @@ highlight_record_arc_span(const Shape *host, const HighlightRecord *r,
     DPoint head = r->pt[0];
     DPoint tail = r->pt[r->n - 1];
     double a = 0.0, b = 0.0;
+    double host_arc = 0.0;
 
     if (host->kind == SHAPE_LINE) {
         DPoint pts[2] = { host->u.line.a, host->u.line.b };
         a = project_point_to_polyline_arc(pts, 2, head);
         b = project_point_to_polyline_arc(pts, 2, tail);
+        host_arc = polyline_total_arc(pts, 2);
     } else if (host->kind == SHAPE_PATH) {
         if (host->u.path.n < 2) return FALSE;
         a = project_point_to_polyline_arc(host->u.path.pt, host->u.path.n, head);
         b = project_point_to_polyline_arc(host->u.path.pt, host->u.path.n, tail);
+        host_arc = polyline_total_arc(host->u.path.pt, host->u.path.n);
     } else {
         return FALSE;
     }
     if (a > b) { double t = a; a = b; b = t; }
+
+    /* 端点吸附：贴齐 0 / host_arc，消除相邻 host 间的视觉间隙 */
+    double snap_eps = r->width * 0.5;
+    if (snap_eps < 3.0) snap_eps = 3.0;
+    if (a < snap_eps) a = 0.0;
+    if (host_arc > 0.0 && host_arc - b < snap_eps) b = host_arc;
+
     *out_s = a;
     *out_e = b;
     return TRUE;
@@ -230,9 +266,38 @@ draw_heatmap(ProgressAxis *pa, cairo_t *cr, int height)
                 if (x1 < x0) { double t = x0; x0 = x1; x1 = t; }
                 if (x1 - x0 < 1.0) x1 = x0 + 1.0;  /* 至少 1px 可见 */
 
+                /* 默认淡黄热力图 */
                 cairo_set_source_rgba(cr, 1.0, 0.85, 0.20, 0.25);
                 cairo_rectangle(cr, x0, mid_y - 10.0, x1 - x0, 20.0);
                 cairo_fill(cr);
+
+                /* 突出覆盖：属于 emph 集合的记录用更深的橙色 */
+                gboolean is_emph = FALSE;
+                if (pa->emph_keys && pa->emph_keys->len > 0) {
+                    for (guint k = 0; k < pa->emph_keys->len; k++) {
+                        const ProgressAxisHLKey *key =
+                            &g_array_index(pa->emph_keys, ProgressAxisHLKey, k);
+                        if (key->page_idx == i && key->hl_id == r->id) {
+                            is_emph = TRUE; break;
+                        }
+                    }
+                }
+                if (is_emph) {
+                    cairo_set_source_rgba(cr, 1.0, 0.55, 0.05, 0.60);
+                    cairo_rectangle(cr, x0, mid_y - 10.0, x1 - x0, 20.0);
+                    cairo_fill(cr);
+                }
+
+                /* 聚焦描边：单点跳转高亮 */
+                if (pa->focus_hl_id != 0 &&
+                    pa->focus_page == i && pa->focus_hl_id == r->id &&
+                    (x1 - x0) > 1.5) {
+                    cairo_set_source_rgba(cr, 0.85, 0.10, 0.10, 1.0);
+                    cairo_set_line_width(cr, 1.5);
+                    cairo_rectangle(cr, x0 + 0.75, mid_y - 10.0 + 0.75,
+                                    (x1 - x0) - 1.5, 20.0 - 1.5);
+                    cairo_stroke(cr);
+                }
             }
         }
     }
@@ -343,6 +408,8 @@ progress_axis_new(GtkDrawingArea *canvas, Album *album)
     pa->album        = album;
     pa->canvas       = canvas;
     pa->page_offsets = g_array_new(FALSE, FALSE, sizeof(double));
+    pa->focus_page   = -1;
+    pa->focus_hl_id  = 0;
 
     /* canvas 主由主窗口拥有；主窗口销毁时 canvas 先于
      * appview_free 被销毁。这里用 weak pointer 跟踪，canvas 销毁
@@ -366,6 +433,7 @@ progress_axis_free(ProgressAxis *pa)
         pa->canvas = NULL;
     }
     if (pa->page_offsets) g_array_free(pa->page_offsets, TRUE);
+    if (pa->emph_keys)    g_array_free(pa->emph_keys, TRUE);
     g_free(pa);
 }
 
@@ -590,4 +658,111 @@ progress_axis_setup_playhead(ProgressAxis *pa, GtkWidget *body_container)
                      G_CALLBACK(on_playhead_drag_update), pa);
     gtk_widget_add_controller(GTK_WIDGET(pa->canvas),
                               GTK_EVENT_CONTROLLER(drag));
+}
+
+/* ─── 高亮突出 / 聚焦 / 拾取 ────────────────────────────────── */
+
+void
+progress_axis_set_emphasized(ProgressAxis *pa, GArray *keys)
+{
+    if (!pa) return;
+    if (!pa->emph_keys)
+        pa->emph_keys = g_array_new(FALSE, FALSE, sizeof(ProgressAxisHLKey));
+    g_array_set_size(pa->emph_keys, 0);
+    if (keys && keys->len > 0) {
+        g_array_append_vals(pa->emph_keys, keys->data, keys->len);
+    }
+    if (pa->canvas) gtk_widget_queue_draw(GTK_WIDGET(pa->canvas));
+}
+
+void
+progress_axis_clear_emphasized(ProgressAxis *pa)
+{
+    if (!pa) return;
+    if (pa->emph_keys && pa->emph_keys->len > 0)
+        g_array_set_size(pa->emph_keys, 0);
+    if (pa->canvas) gtk_widget_queue_draw(GTK_WIDGET(pa->canvas));
+}
+
+void
+progress_axis_set_focused_highlight(ProgressAxis *pa, int page, guint64 hl_id)
+{
+    if (!pa) return;
+    if (hl_id == 0) {
+        pa->focus_page  = -1;
+        pa->focus_hl_id = 0;
+    } else {
+        pa->focus_page  = page;
+        pa->focus_hl_id = hl_id;
+    }
+    if (pa->canvas) gtk_widget_queue_draw(GTK_WIDGET(pa->canvas));
+}
+
+void
+progress_axis_clear_focused_highlight(ProgressAxis *pa)
+{
+    progress_axis_set_focused_highlight(pa, -1, 0);
+}
+
+/* 拾取：运用与 draw_heatmap 相同的几何计算，逐条检测
+ * 点 (x,y) 是否落在热力图色带矩形 [x0,x1]×[mid-10, mid+10] 内。
+ * 多条重叠时返回首个命中（页越小、同页中记录顺序越靠前者优先）。 */
+gboolean
+progress_axis_pick_highlight_at_px(ProgressAxis *pa,
+                                    double x, double y,
+                                    int *out_page, guint64 *out_hl_id)
+{
+    if (!pa || !pa->canvas) return FALSE;
+    int height = gtk_widget_get_height(GTK_WIDGET(pa->canvas));
+    if (height <= 0) return FALSE;
+    double mid_y = (double)height * 0.5;
+    if (y < mid_y - 10.0 || y > mid_y + 10.0) return FALSE;
+
+    int n = album_page_count(pa->album);
+    for (int i = 0; i < n; i++) {
+        AlbumPage *p = album_get_page(pa->album, i);
+        if (!p || !p->doc || !p->doc->layers) continue;
+        double base = (pa->page_offsets && (guint)i < pa->page_offsets->len)
+                      ? g_array_index(pa->page_offsets, double, i) : 0.0;
+        DoodleDoc *doc = p->doc;
+
+        for (guint li = 0; li < doc->layers->len; li++) {
+            const Layer *L = &g_array_index(doc->layers, Layer, li);
+            if (L->kind != LAYER_HIGHLIGHT) continue;
+            if (!L->visible) continue;
+            if (!L->highlights) continue;
+
+            for (guint hi = 0; hi < L->highlights->len; hi++) {
+                const HighlightRecord *r = g_ptr_array_index(L->highlights, hi);
+                if (!r) continue;
+
+                double layer_start = 0.0;
+                const Shape *host = locate_host_shape(
+                    doc, r->host_layer_idx, r->host_shape_number,
+                    &layer_start);
+                if (!host) continue;
+
+                double s_local = 0.0, e_local = 0.0;
+                if (!highlight_record_arc_span(host, r, &s_local, &e_local))
+                    continue;
+
+                double host_layer_pre = layer_local_start_in_page(
+                    doc, r->host_layer_idx);
+                double s_global = base + host_layer_pre + layer_start + s_local;
+                double e_global = base + host_layer_pre + layer_start + e_local;
+
+                double x0 = arc_to_px(pa, s_global);
+                double x1 = arc_to_px(pa, e_global);
+                if (x1 < x0) { double t = x0; x0 = x1; x1 = t; }
+                if (x1 - x0 < 1.0) x1 = x0 + 1.0;
+
+                if (x >= x0 && x <= x1) {
+                    if (out_page)  *out_page  = i;
+                    if (out_hl_id) *out_hl_id = r->id;
+                    return TRUE;
+                }
+            }
+        }
+    }
+    return FALSE;
 }

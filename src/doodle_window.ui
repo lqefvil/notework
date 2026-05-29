@@ -90,6 +90,62 @@
                     <property name="group">tool_select_btn</property>
                   </object>
                 </child>
+                <child>
+                  <object class="GtkToggleButton" id="tool_hl_erase_btn">
+                    <property name="label">高亮擦</property>
+                    <property name="tooltip-text">擦除高亮（命中即整条删除；不影响路径/直线）</property>
+                    <property name="group">tool_select_btn</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkToggleButton" id="tool_rect_btn">
+                    <property name="label">矩形</property>
+                    <property name="tooltip-text">绘制矩形（默认写入路径层并自动编号；切「绘画层」可与图片融合）</property>
+                    <property name="group">tool_select_btn</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkToggleButton" id="tool_ellipse_btn">
+                    <property name="label">椭圆</property>
+                    <property name="tooltip-text">绘制椭圆/圆（默认写入路径层并自动编号；切「绘画层」可与图片融合）</property>
+                    <property name="group">tool_select_btn</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <!-- 目标层切换：路径层 / 绘画层 -->
+            <child type="end">
+              <object class="GtkBox" id="target_box">
+                <property name="spacing">2</property>
+                <property name="margin-end">6</property>
+                <property name="css-classes">linked</property>
+                <child>
+                  <object class="GtkToggleButton" id="target_path_btn">
+                    <property name="label">路径层</property>
+                    <property name="tooltip-text">把图形写入当前活动涂鸦图层（参与编号/缺号统计）</property>
+                    <property name="active">true</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkToggleButton" id="target_paint_btn">
+                    <property name="label">绘画层</property>
+                    <property name="tooltip-text">把图形写入顶部「绘画层」（与图片融合，不参与编号）</property>
+                    <property name="group">target_path_btn</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <!-- 笔色选择：作用于此后新绘制 -->
+            <child type="end">
+              <object class="GtkColorDialogButton" id="pen_color_btn">
+                <property name="tooltip-text">选择笔色（仅作用于此后新绘制的图形；已存在图形保持原色）</property>
+                <property name="margin-end">6</property>
+                <property name="dialog">
+                  <object class="GtkColorDialog">
+                    <property name="title">选择笔色</property>
+                    <property name="with-alpha">false</property>
+                  </object>
+                </property>
               </object>
             </child>
             <child type="end">

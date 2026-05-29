@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  tokensam.gresource.xml — Token 级 SAM 模块独立资源清单
+  使用单独 prefix 避免与主程序资源冲突；同时复用主程序的 style.css。
+-->
+<gresources>
+  <gresource prefix="/com/github/notework/tokensam">
+    <file preprocess="xml-stripblanks">tokensam_window.ui</file>
+  </gresource>
+  <gresource prefix="/com/github/notework">
+    <file>style.css</file>
+  </gresource>
+</gresources>

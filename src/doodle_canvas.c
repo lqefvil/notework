@@ -39,6 +39,16 @@ typedef struct {
     DPoint   line_start, line_cur;
     Shape   *path_pending;
 
+    /* 绘画目标层切换：TRUE 时 LINE/PATH 落到 paint 层（不存在则建）；
+     * FALSE 时 LINE/PATH 落到 active doodle 路径层。
+     * RECT/ELLIPSE 工具被选中时强制为 TRUE。
+     * 对 SELECT/ERASE：在 TRUE 时操作 paint 层内容；FALSE 时操作 active doodle 层。 */
+    gboolean paint_target;
+
+    /* 全局笔色：作用于此后落地的新形状（不影响已存在）。
+     * 默认 {0,0,0,1}（黑色不透明）。 */
+    DRGBA    pen_color;
+
     double   erase_radius;
 
     /* 选择 / 拖动 */
@@ -193,6 +203,13 @@ static void shape_local_bbox(const Shape *s,
             if (p.y < *y0) *y0 = p.y;
             if (p.y > *y1) *y1 = p.y;
         }
+        break;
+    case SHAPE_RECT:
+    case SHAPE_ELLIPSE:
+        *x0 = MIN(s->u.box.a.x, s->u.box.b.x);
+        *y0 = MIN(s->u.box.a.y, s->u.box.b.y);
+        *x1 = MAX(s->u.box.a.x, s->u.box.b.x);
+        *y1 = MAX(s->u.box.a.y, s->u.box.b.y);
         break;
     case SHAPE_ARRAY: {
         if (s->u.arr.n_bases == 0) { *x0=*y0=*x1=*y1=0; break; }
@@ -496,18 +513,86 @@ static void draw_shape_geom(cairo_t *cr, const Shape *s,
                             double ox, double oy) {
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
     cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
+    /* 双色描边（halo 光环式）：先描白色光环（宽 = base + 1.6），
+     * 再描深色内线（宽 = base）。在亮/暗背景下都能保证清晰可见。 */
+    const double base_w   = 1.0;
+    const double halo_w   = base_w + 1.6;
+    /* inner 颜色取自 shape.color，为兼容 0 初始化（a=0）回退到黑色不透明 */
+    DRGBA col = s->color;
+    if (col.a <= 0.0) col = (DRGBA){0.05, 0.05, 0.05, 1.0};
     switch (s->kind) {
     case SHAPE_LINE:
-        cairo_set_line_width(cr, 1.0);
+        cairo_save(cr);
+        /* halo */
+        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.85);
+        cairo_set_line_width(cr, halo_w);
         cairo_move_to(cr, s->u.line.a.x + ox, s->u.line.a.y + oy);
         cairo_line_to(cr, s->u.line.b.x + ox, s->u.line.b.y + oy);
         cairo_stroke(cr);
+        /* inner */
+        cairo_set_source_rgba(cr, col.r, col.g, col.b, col.a);
+        cairo_set_line_width(cr, base_w);
+        cairo_move_to(cr, s->u.line.a.x + ox, s->u.line.a.y + oy);
+        cairo_line_to(cr, s->u.line.b.x + ox, s->u.line.b.y + oy);
+        cairo_stroke(cr);
+        cairo_restore(cr);
         break;
     case SHAPE_PATH:
-        cairo_set_line_width(cr, 1.0);
+        cairo_save(cr);
+        /* halo */
+        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.85);
+        cairo_set_line_width(cr, halo_w);
         cairo_path_for_path_shape(cr, s, ox, oy);
         cairo_stroke(cr);
+        /* inner */
+        cairo_set_source_rgba(cr, col.r, col.g, col.b, col.a);
+        cairo_set_line_width(cr, base_w);
+        cairo_path_for_path_shape(cr, s, ox, oy);
+        cairo_stroke(cr);
+        cairo_restore(cr);
         break;
+    case SHAPE_RECT: {
+        double rx = MIN(s->u.box.a.x, s->u.box.b.x) + ox;
+        double ry = MIN(s->u.box.a.y, s->u.box.b.y) + oy;
+        double rw = ABS(s->u.box.b.x - s->u.box.a.x);
+        double rh = ABS(s->u.box.b.y - s->u.box.a.y);
+        cairo_save(cr);
+        /* halo */
+        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.85);
+        cairo_set_line_width(cr, halo_w);
+        cairo_rectangle(cr, rx, ry, rw, rh);
+        cairo_stroke(cr);
+        /* inner */
+        cairo_set_source_rgba(cr, col.r, col.g, col.b, col.a);
+        cairo_set_line_width(cr, base_w);
+        cairo_rectangle(cr, rx, ry, rw, rh);
+        cairo_stroke(cr);
+        cairo_restore(cr);
+        break;
+    }
+    case SHAPE_ELLIPSE: {
+        double cx = (s->u.box.a.x + s->u.box.b.x) * 0.5 + ox;
+        double cy = (s->u.box.a.y + s->u.box.b.y) * 0.5 + oy;
+        double rx = ABS(s->u.box.b.x - s->u.box.a.x) * 0.5;
+        double ry = ABS(s->u.box.b.y - s->u.box.a.y) * 0.5;
+        if (rx <= 0 || ry <= 0) break;
+        cairo_save(cr);
+        /* 通过缩放把单位圆变椭圆 */
+        cairo_translate(cr, cx, cy);
+        cairo_scale(cr, rx, ry);
+        /* halo */
+        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.85);
+        cairo_set_line_width(cr, halo_w / ((rx + ry) * 0.5));
+        cairo_arc(cr, 0, 0, 1.0, 0, 2 * G_PI);
+        cairo_stroke(cr);
+        /* inner */
+        cairo_set_source_rgba(cr, col.r, col.g, col.b, col.a);
+        cairo_set_line_width(cr, base_w / ((rx + ry) * 0.5));
+        cairo_arc(cr, 0, 0, 1.0, 0, 2 * G_PI);
+        cairo_stroke(cr);
+        cairo_restore(cr);
+        break;
+    }
     case SHAPE_ARRAY:
         break;
     }
@@ -518,7 +603,7 @@ static void draw_number_label(cairo_t *cr, int number, double x, double y) {
     g_snprintf(buf, sizeof buf, "%d", number);
     PangoLayout *pl = pango_cairo_create_layout(cr);
     PangoFontDescription *fd =
-        pango_font_description_from_string("Sans Bold 8");
+        pango_font_description_from_string("Sans Bold 10");
     pango_layout_set_font_description(pl, fd);
     pango_font_description_free(fd);
     pango_layout_set_text(pl, buf, -1);
@@ -526,9 +611,16 @@ static void draw_number_label(cairo_t *cr, int number, double x, double y) {
     pango_layout_get_pixel_size(pl, &tw, &th);
 
     cairo_save(cr);
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.85);
+    /* 白底矩形（halo 内层），更高 alpha 提升对比 */
+    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.95);
     cairo_rectangle(cr, x - 1, y - 1, tw + 2, th + 2);
     cairo_fill(cr);
+    /* 1px 深色描边，使深色背景下白底也能勾勒出来 */
+    cairo_set_source_rgb(cr, 0.05, 0.05, 0.05);
+    cairo_set_line_width(cr, 1.0);
+    cairo_rectangle(cr, x - 1 + 0.5, y - 1 + 0.5, tw + 2, th + 2);
+    cairo_stroke(cr);
+    /* 深红字 */
     cairo_set_source_rgb(cr, 0.78, 0.13, 0.13);
     cairo_move_to(cr, x, y);
     pango_cairo_show_layout(cr, pl);
@@ -542,6 +634,11 @@ static void shape_anchor(const Shape *s, double *ax, double *ay) {
     case SHAPE_PATH:
         if (s->u.path.n) { *ax = s->u.path.pt[0].x; *ay = s->u.path.pt[0].y; }
         else             { *ax = 0; *ay = 0; }
+        break;
+    case SHAPE_RECT:
+    case SHAPE_ELLIPSE:
+        *ax = MIN(s->u.box.a.x, s->u.box.b.x);
+        *ay = MIN(s->u.box.a.y, s->u.box.b.y);
         break;
     case SHAPE_ARRAY:
         if (s->u.arr.n_bases > 0) {
@@ -573,6 +670,26 @@ static gboolean idx_in_array(GArray *a, int v) {
     for (guint k = 0; k < a->len; k++)
         if (g_array_index(a, int, k) == v) return TRUE;
     return FALSE;
+}
+
+/* 获取当前操作目标层下标：paint_target=TRUE 时返回最顶 paint 层；
+ * 否则返回 active_layer。若 paint_target=TRUE 但 paint 层不存在，
+ * 此函数仍返回 -1，调用方需自行调用 doc_ensure_top_paint_layer 创建。 */
+static int target_layer_idx(const CanvasCtx *c) {
+    if (c->paint_target) {
+        return doc_find_top_paint_layer(c->doc);
+    }
+    return c->doc->active_layer;
+}
+
+/* target_store：当前 hit-test/select/erase 操作的目标 store；
+ * paint_target=TRUE 但 paint 层不存在时返回 NULL（调用方需先 ensure）。 */
+static ShapeStore *target_store(const CanvasCtx *c) {
+    int li = target_layer_idx(c);
+    if (li < 0 || li >= doc_layer_count(c->doc)) return NULL;
+    Layer *L = &g_array_index(c->doc->layers, Layer, li);
+    if (L->kind != LAYER_DOODLE) return NULL;
+    return &L->store;
 }
 
 /* 在指定 cairo_t 上画出 doc 的图层叠加结果（不含交互覆层）。
@@ -627,16 +744,18 @@ static void render_doc_layers(cairo_t *cr, DoodleDoc *doc,
                                        * s->u.arr.n_bases + b;
                             draw_number_label(cr,
                                 s->u.arr.child_numbers[slot],
-                                ax + ox + 4, ay + oy - 14);
+                                ax + ox + 4, ay + oy - 16);
                         }
                     }
                 }
             } else {
                 draw_shape_geom(cr, s, s->dx, s->dy);
-                double ax, ay;
-                shape_anchor(s, &ax, &ay);
-                draw_number_label(cr, s->number, ax + s->dx + 4,
-                                  ay + s->dy - 14);
+                if (!L->is_paint) {
+                    double ax, ay;
+                    shape_anchor(s, &ax, &ay);
+                    draw_number_label(cr, s->number, ax + s->dx + 4,
+                                      ay + s->dy - 16);
+                }
             }
         }
 
@@ -689,6 +808,7 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr,
      * 这里仍复用原逻辑，skip 仅在 active 层发生。
      * 为避免在其他图层也跳过，这里随 active_layer 判断。 */
     int active = c->doc->active_layer;
+    int target_li = target_layer_idx(c);
     int n_layers = doc_layer_count(c->doc);
     for (int li = 0; li < n_layers; li++) {
         Layer *L = &g_array_index(c->doc->layers, Layer, li);
@@ -734,18 +854,20 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr,
                                        * s->u.arr.n_bases + b;
                             draw_number_label(cr,
                                 s->u.arr.child_numbers[slot],
-                                ax + ox + 4, ay + oy - 14);
+                                ax + ox + 4, ay + oy - 16);
                         }
                     }
                 }
                 if (li == active && is_selected(c, (int)i)) draw_selection_box(cr, s);
             } else {
                 draw_shape_geom(cr, s, s->dx, s->dy);
-                double ax, ay;
-                shape_anchor(s, &ax, &ay);
-                draw_number_label(cr, s->number, ax + s->dx + 4,
-                                  ay + s->dy - 14);
-                if (li == active && is_selected(c, (int)i)) draw_selection_box(cr, s);
+                if (!L->is_paint) {
+                    double ax, ay;
+                    shape_anchor(s, &ax, &ay);
+                    draw_number_label(cr, s->number, ax + s->dx + 4,
+                                      ay + s->dy - 16);
+                }
+                if (li == target_li && is_selected(c, (int)i)) draw_selection_box(cr, s);
             }
         }
 
@@ -759,25 +881,59 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr,
                             c->hl_sel_layer, c->hl_sel_rec,
                             c->hl_pending);
 
-    /* 直线橡皮筋（含过起点的水平参考线） */
+    /* 直线 / 矩形 / 椭圆 橡皮筋预览（含 LINE 时过起点的水平参考线） */
     if (c->drawing_line) {
-        /* 水平参考线：横贯画布的细虚线，走过起点 y */
-        cairo_save(cr);
-        double href_dashes[] = { 4.0, 4.0 };
-        cairo_set_source_rgba(cr, 0.13, 0.45, 0.85, 0.35);
-        cairo_set_line_width(cr, 1.0);
-        cairo_set_dash(cr, href_dashes, 2, 0);
-        cairo_move_to(cr, 0,     c->line_start.y);
-        cairo_line_to(cr, doc_w, c->line_start.y);
-        cairo_stroke(cr);
-        cairo_restore(cr);
+        if (c->tool == TOOL_LINE) {
+            /* 水平参考线：横贯画布的细虚线，走过起点 y。
+             * 双色描边：白光环 + 深色内线，深/亮背景下都可见。 */
+            cairo_save(cr);
+            double href_dashes[] = { 4.0, 4.0 };
+            /* 外层白色 halo */
+            cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.7);
+            cairo_set_line_width(cr, 2.5);
+            cairo_set_dash(cr, href_dashes, 2, 0);
+            cairo_move_to(cr, 0,     c->line_start.y);
+            cairo_line_to(cr, doc_w, c->line_start.y);
+            cairo_stroke(cr);
+            /* 内层深色虚线 */
+            cairo_set_source_rgba(cr, 0.05, 0.05, 0.05, 0.85);
+            cairo_set_line_width(cr, 1.0);
+            cairo_set_dash(cr, href_dashes, 2, 0);
+            cairo_move_to(cr, 0,     c->line_start.y);
+            cairo_line_to(cr, doc_w, c->line_start.y);
+            cairo_stroke(cr);
+            cairo_restore(cr);
+        }
 
         cairo_save(cr);
         cairo_set_source_rgba(cr, 0.13, 0.45, 0.85, 0.8);
         cairo_set_line_width(cr, 1.0);
-        cairo_move_to(cr, c->line_start.x, c->line_start.y);
-        cairo_line_to(cr, c->line_cur.x,   c->line_cur.y);
-        cairo_stroke(cr);
+        if (c->tool == TOOL_LINE) {
+            cairo_move_to(cr, c->line_start.x, c->line_start.y);
+            cairo_line_to(cr, c->line_cur.x,   c->line_cur.y);
+            cairo_stroke(cr);
+        } else if (c->tool == TOOL_RECT) {
+            double rx = MIN(c->line_start.x, c->line_cur.x);
+            double ry = MIN(c->line_start.y, c->line_cur.y);
+            double rw = ABS(c->line_cur.x - c->line_start.x);
+            double rh = ABS(c->line_cur.y - c->line_start.y);
+            cairo_rectangle(cr, rx, ry, rw, rh);
+            cairo_stroke(cr);
+        } else if (c->tool == TOOL_ELLIPSE) {
+            double cx_ = (c->line_start.x + c->line_cur.x) * 0.5;
+            double cy_ = (c->line_start.y + c->line_cur.y) * 0.5;
+            double rx_ = ABS(c->line_cur.x - c->line_start.x) * 0.5;
+            double ry_ = ABS(c->line_cur.y - c->line_start.y) * 0.5;
+            if (rx_ > 0 && ry_ > 0) {
+                cairo_save(cr);
+                cairo_translate(cr, cx_, cy_);
+                cairo_scale(cr, rx_, ry_);
+                cairo_set_line_width(cr, 1.0 / ((rx_ + ry_) * 0.5));
+                cairo_arc(cr, 0, 0, 1.0, 0, 2 * G_PI);
+                cairo_stroke(cr);
+                cairo_restore(cr);
+            }
+        }
         cairo_restore(cr);
     }
 
@@ -815,17 +971,27 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr,
     }
 
     /* 擦除头光标 */
-    if (c->tool == TOOL_ERASE && c->has_pointer && !c->array_active) {
+    if ((c->tool == TOOL_ERASE || c->tool == TOOL_HL_ERASE)
+        && c->has_pointer && !c->array_active) {
         cairo_save(cr);
         double dashes[] = { 3.0, 2.0 };
-        cairo_set_source_rgba(cr, 0.85, 0.20, 0.20, 0.9);
+        gboolean is_hl = (c->tool == TOOL_HL_ERASE);
+        if (is_hl) {
+            cairo_set_source_rgba(cr, 0.95, 0.78, 0.10, 0.9);
+        } else {
+            cairo_set_source_rgba(cr, 0.85, 0.20, 0.20, 0.9);
+        }
         cairo_set_line_width(cr, 1.5);
         cairo_set_dash(cr, dashes, 2, 0);
         cairo_arc(cr, c->pointer_pos.x, c->pointer_pos.y,
                   c->erase_radius, 0, 2 * G_PI);
         cairo_stroke(cr);
         cairo_set_dash(cr, NULL, 0, 0);
-        cairo_set_source_rgba(cr, 0.85, 0.20, 0.20, 0.6);
+        if (is_hl) {
+            cairo_set_source_rgba(cr, 0.95, 0.78, 0.10, 0.6);
+        } else {
+            cairo_set_source_rgba(cr, 0.85, 0.20, 0.20, 0.6);
+        }
         cairo_arc(cr, c->pointer_pos.x, c->pointer_pos.y,
                   1.5, 0, 2 * G_PI);
         cairo_fill(cr);
@@ -859,6 +1025,31 @@ static double dist_to_shape(const Shape *s, double x, double y,
         }
         return m;
     }
+    case SHAPE_RECT: {
+        double x0 = MIN(s->u.box.a.x, s->u.box.b.x);
+        double y0 = MIN(s->u.box.a.y, s->u.box.b.y);
+        double x1 = MAX(s->u.box.a.x, s->u.box.b.x);
+        double y1 = MAX(s->u.box.a.y, s->u.box.b.y);
+        /* 四条边最小距离 */
+        double d1 = dist_pt_seg(sx, sy, x0, y0, x1, y0);
+        double d2 = dist_pt_seg(sx, sy, x1, y0, x1, y1);
+        double d3 = dist_pt_seg(sx, sy, x1, y1, x0, y1);
+        double d4 = dist_pt_seg(sx, sy, x0, y1, x0, y0);
+        double m = d1; if (d2 < m) m = d2; if (d3 < m) m = d3; if (d4 < m) m = d4;
+        return m;
+    }
+    case SHAPE_ELLIPSE: {
+        double cx = (s->u.box.a.x + s->u.box.b.x) * 0.5;
+        double cy = (s->u.box.a.y + s->u.box.b.y) * 0.5;
+        double rx = ABS(s->u.box.b.x - s->u.box.a.x) * 0.5;
+        double ry = ABS(s->u.box.b.y - s->u.box.a.y) * 0.5;
+        if (rx <= 0 || ry <= 0) return 1e18;
+        /* 近似：把点映射到单位圆坐标，距离 ≈ |1 - r_norm| * min(rx,ry) */
+        double nx = (sx - cx) / rx;
+        double ny = (sy - cy) / ry;
+        double rn = hypot(nx, ny);
+        return ABS(rn - 1.0) * MIN(rx, ry);
+    }
     case SHAPE_ARRAY: {
         /* 按副本几何最短距离命中（不再用整体 bbox，避免空隙误命中） */
         double m = 1e18;
@@ -880,7 +1071,8 @@ static double dist_to_shape(const Shape *s, double x, double y,
 }
 
 static int hit_test(CanvasCtx *c, double x, double y, double thresh) {
-    ShapeStore *st = doc_active_store(c->doc);
+    ShapeStore *st = target_store(c);
+    if (!st) return -1;
     for (gssize i = (gssize)st->n - 1; i >= 0; i--) {
         Shape *s = st->items[i];
         double d = (s->kind == SHAPE_ARRAY)
@@ -889,6 +1081,18 @@ static int hit_test(CanvasCtx *c, double x, double y, double thresh) {
         if (d <= thresh) return (int)i;
     }
     return -1;
+}
+
+/* 落地新建 shape：按 paint_target 分发到 paint 层或 active 路径层 */
+static void commit_new_shape(CanvasCtx *c, Shape *s) {
+    /* 用全局笔色覆盖 shape 默认色：仅作用于此后落地的新形状 */
+    s->color = c->pen_color;
+    if (c->paint_target) {
+        int li = doc_ensure_top_paint_layer(c->doc);
+        doc_add_shape_to_paint_layer(c->doc, li, s);
+    } else {
+        doc_add_shape(c->doc, s);
+    }
 }
 
 /* ─── 擦除 ────────────────────────────────────────────────────── */
@@ -933,6 +1137,27 @@ static gboolean erase_line_split(CanvasCtx *c, const Shape *s,
 }
 
 static void erase_at(CanvasCtx *c, double x, double y) {
+    /* paint 层：整体删除被擦除头碰到的形状（绘画语义不做精细切分） */
+    if (c->paint_target) {
+        int li = doc_find_top_paint_layer(c->doc);
+        if (li < 0) return;
+        Layer *L = &g_array_index(c->doc->layers, Layer, li);
+        ShapeStore *st = &L->store;
+        gboolean any = FALSE;
+        for (gssize i = (gssize)st->n - 1; i >= 0; i--) {
+            Shape *s = st->items[i];
+            double d = (s->kind == SHAPE_ARRAY)
+                     ? dist_to_shape(s, x, y, 0, 0)
+                     : dist_to_shape(s, x, y, s->dx, s->dy);
+            if (d <= c->erase_radius) {
+                doc_remove_shape_at_layer(c->doc, li, (gsize)i);
+                any = TRUE;
+            }
+        }
+        if (any) selection_clear(c);
+        return;
+    }
+
     ShapeStore *st = doc_active_store(c->doc);
     gboolean any = FALSE;
 
@@ -1003,6 +1228,44 @@ static void erase_at(CanvasCtx *c, double x, double y) {
     if (any) selection_clear(c);
 }
 
+/* 高亮擦：遍历所有 LAYER_HIGHLIGHT，命中（最近段距离 ≤ erase_radius + width/2）
+ * 即整条删除并 highlight_record_free。
+ * 因 highlights 容器未配置 free_func，本函数手动释放，避免泄漏。
+ * 若被删除的恰是 hl_sel 当前选中记录，则重置选中态为 -1；
+ * 若 hl_sel_rec 大于被删下标，需要左移 1 以保持指向同一条记录。 */
+static void hl_erase_at(CanvasCtx *c, double x, double y) {
+    if (!c->doc) return;
+    int n = doc_layer_count(c->doc);
+    gboolean any = FALSE;
+    for (int li = 0; li < n; li++) {
+        Layer *L = &g_array_index(c->doc->layers, Layer, li);
+        if (!L->visible || L->kind != LAYER_HIGHLIGHT || !L->highlights)
+            continue;
+        for (gssize ri = (gssize)L->highlights->len - 1; ri >= 0; ri--) {
+            HighlightRecord *r = g_ptr_array_index(L->highlights, ri);
+            if (!r || r->n < 2) continue;
+            double bestd = 1e18;
+            for (gsize i = 1; i < r->n; i++) {
+                double d = dist_pt_seg(x, y,
+                    r->pt[i-1].x, r->pt[i-1].y,
+                    r->pt[i  ].x, r->pt[i  ].y);
+                if (d < bestd) bestd = d;
+            }
+            if (bestd <= c->erase_radius + r->width * 0.5) {
+                if (c->hl_sel_layer == li && c->hl_sel_rec == (int)ri) {
+                    c->hl_sel_layer = -1; c->hl_sel_rec = -1;
+                } else if (c->hl_sel_layer == li && c->hl_sel_rec > (int)ri) {
+                    c->hl_sel_rec--;
+                }
+                highlight_record_free(r);
+                g_ptr_array_remove_index(L->highlights, (guint)ri);
+                any = TRUE;
+            }
+        }
+    }
+    if (any) gtk_widget_queue_draw(c->area);
+}
+
 /* ─── 手势事件 ───────────────────────────────────────────────── */
 
 static void on_drag_begin(GtkGestureDrag *g, double sx, double sy,
@@ -1027,13 +1290,25 @@ static void on_drag_begin(GtkGestureDrag *g, double sx, double sy,
         c->line_start.x = sx; c->line_start.y = sy;
         c->line_cur     = c->line_start;
         break;
+    case TOOL_RECT:
+    case TOOL_ELLIPSE:
+        /* 复用 line_start/line_cur 作为「两点工具」起止点 */
+        c->drawing_line = TRUE;
+        c->line_start.x = sx; c->line_start.y = sy;
+        c->line_cur     = c->line_start;
+        break;
     case TOOL_PATH:
         if (c->path_pending) shape_free(c->path_pending);
         c->path_pending = shape_new_path();
+        c->path_pending->color = c->pen_color;
         shape_path_add_point(c->path_pending, (DPoint){ sx, sy });
         break;
     case TOOL_ERASE:
         erase_at(c, sx, sy);
+        notify_changed(c);
+        break;
+    case TOOL_HL_ERASE:
+        hl_erase_at(c, sx, sy);
         notify_changed(c);
         break;
     case TOOL_HIGHLIGHT: {
@@ -1113,7 +1388,8 @@ static void on_drag_begin(GtkGestureDrag *g, double sx, double sy,
                 c->drag_prev_ox = 0.0;
                 c->drag_prev_oy = 0.0;
                 g_array_set_size(c->sel_origs, 0);
-                ShapeStore *st = doc_active_store(c->doc);
+                ShapeStore *st = target_store(c);
+                if (!st) break;
                 if (c->selected_idx >= 0 &&
                     (gsize)c->selected_idx < st->n) {
                     Shape *ss = st->items[c->selected_idx];
@@ -1166,6 +1442,13 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
             gtk_widget_queue_draw(c->area);
         }
         break;
+    case TOOL_RECT:
+    case TOOL_ELLIPSE:
+        if (c->drawing_line) {
+            c->line_cur.x = cx; c->line_cur.y = cy;
+            gtk_widget_queue_draw(c->area);
+        }
+        break;
     case TOOL_PATH:
         if (c->path_pending) {
             DPoint last = c->path_pending->u.path.pt[
@@ -1178,6 +1461,10 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
         break;
     case TOOL_ERASE:
         erase_at(c, cx, cy);
+        notify_changed(c);
+        break;
+    case TOOL_HL_ERASE:
+        hl_erase_at(c, cx, cy);
         notify_changed(c);
         break;
     case TOOL_HIGHLIGHT:
@@ -1200,7 +1487,8 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
         break;
     case TOOL_SELECT:
         if (c->drag_moving && c->sel_origs->len > 0) {
-            ShapeStore *st = doc_active_store(c->doc);
+            ShapeStore *st = target_store(c);
+            if (!st) break;
             for (guint k = 0; k < c->sel_origs->len; k++) {
                 SelOrig *so = &g_array_index(c->sel_origs, SelOrig, k);
                 if ((gsize)so->idx < st->n) {
@@ -1269,7 +1557,35 @@ static void on_drag_end(GtkGestureDrag *g, double ox, double oy,
             if (dist_pt(c->line_start.x, c->line_start.y, cx, cy)
                     >= MIN_LINE_LEN) {
                 Shape *s = shape_new_line(c->line_start, (DPoint){cx, cy});
-                doc_add_shape(c->doc, s);
+                commit_new_shape(c, s);
+                notify_changed(c);
+            } else {
+                gtk_widget_queue_draw(c->area);
+            }
+        }
+        break;
+    case TOOL_RECT:
+        if (c->drawing_line) {
+            c->drawing_line = FALSE;
+            double w = ABS(cx - c->line_start.x);
+            double h = ABS(cy - c->line_start.y);
+            if (w >= MIN_LINE_LEN && h >= MIN_LINE_LEN) {
+                Shape *s = shape_new_rect(c->line_start, (DPoint){cx, cy});
+                commit_new_shape(c, s);
+                notify_changed(c);
+            } else {
+                gtk_widget_queue_draw(c->area);
+            }
+        }
+        break;
+    case TOOL_ELLIPSE:
+        if (c->drawing_line) {
+            c->drawing_line = FALSE;
+            double w = ABS(cx - c->line_start.x);
+            double h = ABS(cy - c->line_start.y);
+            if (w >= MIN_LINE_LEN && h >= MIN_LINE_LEN) {
+                Shape *s = shape_new_ellipse(c->line_start, (DPoint){cx, cy});
+                commit_new_shape(c, s);
                 notify_changed(c);
             } else {
                 gtk_widget_queue_draw(c->area);
@@ -1279,7 +1595,7 @@ static void on_drag_end(GtkGestureDrag *g, double ox, double oy,
     case TOOL_PATH:
         if (c->path_pending) {
             if (c->path_pending->u.path.n >= 2) {
-                doc_add_shape(c->doc, c->path_pending);
+                commit_new_shape(c, c->path_pending);
                 c->path_pending = NULL;
                 notify_changed(c);
             } else {
@@ -1290,6 +1606,9 @@ static void on_drag_end(GtkGestureDrag *g, double ox, double oy,
         }
         break;
     case TOOL_ERASE:
+        notify_changed(c);
+        break;
+    case TOOL_HL_ERASE:
         notify_changed(c);
         break;
     case TOOL_HIGHLIGHT:
@@ -1317,14 +1636,14 @@ static void on_motion(GtkEventControllerMotion *m,
     double scale = (c->view_scale > 0.0) ? c->view_scale : 1.0;
     c->has_pointer = TRUE;
     c->pointer_pos.x = x / scale; c->pointer_pos.y = y / scale;
-    if (c->tool == TOOL_ERASE) gtk_widget_queue_draw(c->area);
+    if (c->tool == TOOL_ERASE || c->tool == TOOL_HL_ERASE) gtk_widget_queue_draw(c->area);
 }
 
 static void on_motion_leave(GtkEventControllerMotion *m, gpointer data) {
     (void)m;
     CanvasCtx *c = data;
     c->has_pointer = FALSE;
-    if (c->tool == TOOL_ERASE) gtk_widget_queue_draw(c->area);
+    if (c->tool == TOOL_ERASE || c->tool == TOOL_HL_ERASE) gtk_widget_queue_draw(c->area);
 }
 
 /* ─── 公共 API ───────────────────────────────────────────────── */
@@ -1357,6 +1676,7 @@ GtkWidget *doodle_canvas_new(DoodleDoc *doc) {
     c->hl_last_seg       = -1;
     c->hl_sel_layer      = -1;
     c->hl_sel_rec        = -1;
+    c->pen_color         = (DRGBA){0, 0, 0, 1};
     g_object_set_data_full(G_OBJECT(area), CTX_KEY, c, ctx_free);
 
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(area), on_draw, c, NULL);
@@ -1397,10 +1717,43 @@ void doodle_canvas_set_tool(GtkWidget *w, Tool t) {
         c->hl_sel_layer = -1;
         c->hl_sel_rec   = -1;
     }
+    /* paint_target 完全由「绘画层/路径层」segment 自治；
+     * 工具切换不再覆写它。默认全部工具走路径层（自动编号）；
+     * 用户若要把矩形/椭圆/直线/手绘写到「绘画层」与图片融合，
+     * 自行切 segment 即可。 */
     gtk_widget_queue_draw(w);
 }
 
 Tool doodle_canvas_get_tool(GtkWidget *w) { return ctx_of(w)->tool; }
+
+void doodle_canvas_set_paint_target(GtkWidget *w, gboolean to_paint) {
+    CanvasCtx *c = ctx_of(w);
+    if (c->paint_target == to_paint) return;
+    c->paint_target = to_paint;
+    /* 切换目标层后，旧的 selected 索引指向另一 store，必须清除 */
+    selection_clear(c);
+    c->drag_moving = FALSE;
+    g_array_set_size(c->sel_origs, 0);
+    gtk_widget_queue_draw(w);
+}
+
+gboolean doodle_canvas_get_paint_target(GtkWidget *w) {
+    return ctx_of(w)->paint_target;
+}
+
+void doodle_canvas_set_global_pen_color(GtkWidget *w, DRGBA c) {
+    CanvasCtx *cc = ctx_of(w);
+    if (c.a <= 0.0) c.a = 1.0;
+    cc->pen_color = c;
+    /* 仅影响后续新绘制；已有图形保持原色，无需重绘。
+     * 不过若有 path_pending（手绘进行中），同步它以便预览即时反映新色 */
+    if (cc->path_pending) cc->path_pending->color = c;
+    gtk_widget_queue_draw(w);
+}
+
+DRGBA doodle_canvas_get_global_pen_color(GtkWidget *w) {
+    return ctx_of(w)->pen_color;
+}
 
 int doodle_canvas_get_selected_index(GtkWidget *w) {
     return ctx_of(w)->selected_idx;

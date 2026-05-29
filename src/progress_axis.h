@@ -73,4 +73,28 @@ void          progress_axis_set_playhead_arc(ProgressAxis *pa, double arc);
 void          progress_axis_setup_playhead(ProgressAxis *pa,
                                             GtkWidget *body_container);
 
+/* ─── 高亮突出 / 聚焦 / 拾取（供激活区域联动使用） ─────────────
+ * 本模块只提供“渲染参数与拾取查询”，不实现联动交互（交互由 main.c
+ * 挑起 GtkGestureClick 完成）。 */
+typedef struct {
+    int     page_idx;
+    guint64 hl_id;
+} ProgressAxisHLKey;
+
+/* 接管 keys 内容拷贝，不接管 ownership；keys 可传 NULL/空表等同于清空。 */
+void          progress_axis_set_emphasized      (ProgressAxis *pa, GArray *keys);
+void          progress_axis_clear_emphasized    (ProgressAxis *pa);
+
+/* 单点聚焦（跳转后的可视反馈）；id==0 等同于 clear。 */
+void          progress_axis_set_focused_highlight  (ProgressAxis *pa,
+                                                     int page, guint64 hl_id);
+void          progress_axis_clear_focused_highlight(ProgressAxis *pa);
+
+/* 拾取：在热力图绘制区域内命中某条高亮记录。命中返回 TRUE
+ * 并写出 (page, hl_id)；未命中返回 FALSE，*out_* 不修改。 */
+gboolean      progress_axis_pick_highlight_at_px(ProgressAxis *pa,
+                                                  double x, double y,
+                                                  int *out_page,
+                                                  guint64 *out_hl_id);
+
 G_END_DECLS

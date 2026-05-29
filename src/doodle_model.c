@@ -20,6 +20,7 @@ Shape *shape_new_line(DPoint a, DPoint b) {
     s->kind = SHAPE_LINE;
     s->u.line.a = a;
     s->u.line.b = b;
+    s->color = (DRGBA){0, 0, 0, 1};
     return s;
 }
 
@@ -29,6 +30,7 @@ Shape *shape_new_path(void) {
     s->u.path.cap = 16;
     s->u.path.pt  = g_new(DPoint, s->u.path.cap);
     s->u.path.n   = 0;
+    s->color = (DRGBA){0, 0, 0, 1};
     return s;
 }
 
@@ -41,12 +43,31 @@ void shape_path_add_point(Shape *s, DPoint p) {
     s->u.path.pt[s->u.path.n++] = p;
 }
 
+Shape *shape_new_rect(DPoint a, DPoint b) {
+    Shape *s = g_new0(Shape, 1);
+    s->kind = SHAPE_RECT;
+    s->u.box.a = a;
+    s->u.box.b = b;
+    s->color = (DRGBA){0, 0, 0, 1};
+    return s;
+}
+
+Shape *shape_new_ellipse(DPoint a, DPoint b) {
+    Shape *s = g_new0(Shape, 1);
+    s->kind = SHAPE_ELLIPSE;
+    s->u.box.a = a;
+    s->u.box.b = b;
+    s->color = (DRGBA){0, 0, 0, 1};
+    return s;
+}
+
 Shape *shape_clone(const Shape *s) {
     Shape *c = g_new0(Shape, 1);
     c->kind   = s->kind;
     c->number = s->number;
     c->dx     = s->dx;
     c->dy     = s->dy;
+    c->color  = s->color;
     switch (s->kind) {
     case SHAPE_LINE:
         c->u.line = s->u.line;
@@ -58,6 +79,10 @@ Shape *shape_clone(const Shape *s) {
         if (s->u.path.n > 0)
             memcpy(c->u.path.pt, s->u.path.pt,
                    sizeof(DPoint) * s->u.path.n);
+        break;
+    case SHAPE_RECT:
+    case SHAPE_ELLIPSE:
+        c->u.box = s->u.box;
         break;
     case SHAPE_ARRAY: {
         int nb = s->u.arr.n_bases;
@@ -86,6 +111,9 @@ void shape_free(Shape *s) {
         break;
     case SHAPE_PATH:
         g_free(s->u.path.pt);
+        break;
+    case SHAPE_RECT:
+    case SHAPE_ELLIPSE:
         break;
     case SHAPE_ARRAY:
         for (int b = 0; b < s->u.arr.n_bases; b++)
@@ -120,7 +148,8 @@ double shape_arc_length(const Shape *s) {
     }
     case SHAPE_ARRAY:
     default:
-        /* 本期不计入阵列组；需要时可录制其展开后的子形状。 */
+        /* 本期不计入阵列组；需要时可录制其展开后的子形状。
+         * RECT/ELLIPSE 仅出现在 paint 层，不计入路径弧长。 */
         return 0.0;
     }
 }
@@ -131,6 +160,7 @@ double doodle_doc_total_arc(const DoodleDoc *doc) {
     for (guint i = 0; i < doc->layers->len; i++) {
         const Layer *L = &g_array_index(doc->layers, Layer, i);
         if (L->kind != LAYER_DOODLE) continue;
+        if (L->is_paint) continue;
         if (!L->visible) continue;
         for (gsize k = 0; k < L->store.n; k++)
             sum += shape_arc_length(L->store.items[k]);
@@ -183,10 +213,15 @@ static void store_remove_at(ShapeStore *st, gsize idx) {
 
 /* ─── 高亮记录 ────────────────────────────────────────────────────────── */
 
+/* 全局单调递增 ID 计数器，用于为每条 HighlightRecord 分配稳定标识。
+ * 进程内唯一即可（绑定关系仅在内存中维护）。 */
+static guint64 g_hl_seq = 0;
+
 HighlightRecord *highlight_record_new(int host_layer_idx,
                                        int host_shape_number,
                                        double width) {
     HighlightRecord *r = g_new0(HighlightRecord, 1);
+    r->id                = ++g_hl_seq;
     r->host_layer_idx    = host_layer_idx;
     r->host_shape_number = host_shape_number;
     r->width             = width;
@@ -212,6 +247,7 @@ void highlight_record_free(HighlightRecord *r) {
 
 HighlightRecord *highlight_record_clone(const HighlightRecord *src) {
     HighlightRecord *c = g_new0(HighlightRecord, 1);
+    c->id                = ++g_hl_seq;   /* 克隆视为新记录，分配新 id */
     c->host_layer_idx    = src->host_layer_idx;
     c->host_shape_number = src->host_shape_number;
     c->width             = src->width;
@@ -282,6 +318,20 @@ Layer layer_new_highlight_value(const char *name) {
     return l;
 }
 
+Layer layer_new_paint_value(const char *name) {
+    /* 绘画层是「LAYER_DOODLE + is_paint=TRUE」变体：
+     * - 与普通涂鸦层共用 ShapeStore / 渲染 / 选择 / 擦除 通路；
+     * - 但 shapes 不参与编号体系，也不计入 doodle_doc_total_arc。 */
+    Layer l = { 0 };
+    l.kind     = LAYER_DOODLE;
+    l.visible  = TRUE;
+    l.name     = g_strdup(name ? name : "绘画层");
+    l.is_paint = TRUE;
+    store_init(&l.store);
+    l.scale    = 1.0;
+    return l;
+}
+
 /* 深拷贝 ShapeStore */
 static void store_deep_copy(ShapeStore *dst, const ShapeStore *src) {
     store_init(dst);
@@ -301,6 +351,7 @@ Layer layer_clone_value(const Layer *src) {
     l.y       = src->y;
     l.img_w   = src->img_w;
     l.img_h   = src->img_h;
+    l.is_paint = src->is_paint;
     if (src->kind == LAYER_DOODLE) {
         store_deep_copy(&l.store, &src->store);
     } else if (src->kind == LAYER_HIGHLIGHT) {
@@ -373,7 +424,7 @@ int doc_find_top_doodle_layer(const DoodleDoc *doc) {
     int n = doc_layer_count(doc);
     for (int i = n - 1; i >= 0; i--) {
         Layer *L = &g_array_index(doc->layers, Layer, i);
-        if (L->kind == LAYER_DOODLE) return i;
+        if (L->kind == LAYER_DOODLE && !L->is_paint) return i;
     }
     return -1;
 }
@@ -387,6 +438,82 @@ int doc_ensure_top_highlight_layer(DoodleDoc *doc) {
     g_array_append_val(doc->layers, hl);
     /* active_layer 不变；高亮层不可 active（active 仅限 LAYER_DOODLE） */
     return pos;
+}
+
+/* paint 层：is_paint=TRUE 的 LAYER_DOODLE。 */
+int doc_find_top_paint_layer(const DoodleDoc *doc) {
+    int n = doc_layer_count(doc);
+    for (int i = n - 1; i >= 0; i--) {
+        Layer *L = &g_array_index(doc->layers, Layer, i);
+        if (L->kind == LAYER_DOODLE && L->is_paint) return i;
+    }
+    return -1;
+}
+
+/* 不存在则在最顶部 doodle 层「下方」插入一个新的 paint 层；
+ * 若没有任何 doodle 层则插在末尾。返回该 paint 层下标。 */
+int doc_ensure_top_paint_layer(DoodleDoc *doc) {
+    int idx = doc_find_top_paint_layer(doc);
+    if (idx >= 0) return idx;
+    int top_doodle = doc_find_top_doodle_layer(doc);
+    int pos = (top_doodle >= 0) ? top_doodle : doc_layer_count(doc);
+    Layer pl = layer_new_paint_value("绘画层");
+    g_array_insert_val(doc->layers, (guint)pos, pl);
+    /* active_layer 跟随插入位移 */
+    if (pos <= doc->active_layer) doc->active_layer++;
+    return pos;
+}
+
+void doc_add_shape_to_paint_layer(DoodleDoc *doc, int layer_idx, Shape *s) {
+    if (!doc || !s) return;
+    int n = doc_layer_count(doc);
+    if (layer_idx < 0 || layer_idx >= n) { shape_free(s); return; }
+    Layer *L = &g_array_index(doc->layers, Layer, layer_idx);
+    if (L->kind != LAYER_DOODLE || !L->is_paint) {
+        g_warning("doc_add_shape_to_paint_layer: target not a paint layer");
+        shape_free(s);
+        return;
+    }
+    s->number = 0;             /* paint 层不参与编号体系 */
+    store_append(&L->store, s);
+}
+
+/* 把所有 number >= threshold 的整数加 delta（delta 可负） */
+static void store_shift_numbers_ge(ShapeStore *st, int threshold, int delta);
+
+void doc_remove_shape_at_layer(DoodleDoc *doc, int layer_idx, gsize idx) {
+    if (!doc) return;
+    int n = doc_layer_count(doc);
+    if (layer_idx < 0 || layer_idx >= n) return;
+    Layer *L = &g_array_index(doc->layers, Layer, layer_idx);
+    if (L->kind != LAYER_DOODLE) return;
+    ShapeStore *st = &L->store;
+    if (idx >= st->n) return;
+
+    if (L->is_paint) {
+        /* paint 层不参与编号；直接移除 */
+        store_remove_at(st, idx);
+        return;
+    }
+
+    /* 与 doc_remove_shape_at 对 active store 完全等价 */
+    Shape *s = st->items[idx];
+    if (s->kind == SHAPE_ARRAY) {
+        gsize k = (gsize)s->u.arr.rows * (gsize)s->u.arr.cols *
+                  (gsize)s->u.arr.n_bases;
+        int lo = G_MAXINT, hi = 0;
+        for (gsize j = 0; j < k; j++) {
+            int v = s->u.arr.child_numbers[j];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        store_remove_at(st, idx);
+        if (hi >= lo) store_shift_numbers_ge(st, hi + 1, -(int)k);
+    } else {
+        int num = s->number;
+        store_remove_at(st, idx);
+        store_shift_numbers_ge(st, num + 1, -1);
+    }
 }
 
 /* ─── 编号管理 ──────────────────────────────────────────────────── */
@@ -539,6 +666,9 @@ static void shape_canvas_anchor(const Shape *s, double *ax, double *ay) {
     case SHAPE_PATH:
         if (s->u.path.n) { x = s->u.path.pt[0].x; y = s->u.path.pt[0].y; }
         break;
+    case SHAPE_RECT:
+    case SHAPE_ELLIPSE:
+        x = s->u.box.a.x; y = s->u.box.a.y; break;
     case SHAPE_ARRAY: break;
     }
     *ax = x + s->dx; *ay = y + s->dy;
@@ -677,11 +807,16 @@ void doc_remove_layer(DoodleDoc *doc, int idx) {
     if (doc->active_layer > idx) doc->active_layer--;
     if (doc->active_layer >= doc_layer_count(doc))
         doc->active_layer = doc_layer_count(doc) - 1;
-    /* 若 active 指向非 doodle 层，尝试向上推一个 doodle 层 */
-    if (doc_active_layer(doc)->kind != LAYER_DOODLE) {
-        for (int i = doc_layer_count(doc) - 1; i >= 0; i--) {
-            Layer *L = &g_array_index(doc->layers, Layer, i);
-            if (L->kind == LAYER_DOODLE) { doc->active_layer = i; break; }
+    /* 若 active 指向非 doodle / paint 层，尝试回退到一个普通 doodle 路径层 */
+    {
+        Layer *al = doc_active_layer(doc);
+        if (al->kind != LAYER_DOODLE || al->is_paint) {
+            for (int i = doc_layer_count(doc) - 1; i >= 0; i--) {
+                Layer *L = &g_array_index(doc->layers, Layer, i);
+                if (L->kind == LAYER_DOODLE && !L->is_paint) {
+                    doc->active_layer = i; break;
+                }
+            }
         }
     }
 }
@@ -708,6 +843,7 @@ void doc_set_active_layer(DoodleDoc *doc, int idx) {
     if (idx < 0 || idx >= n) return;
     Layer *L = &g_array_index(doc->layers, Layer, idx);
     if (L->kind != LAYER_DOODLE) return; /* 仅允许 doodle 层 active */
+    if (L->is_paint) return;             /* paint 层不接受 active 设定 */
     doc->active_layer = idx;
 }
 

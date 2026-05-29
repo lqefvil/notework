@@ -38,6 +38,9 @@
 #define HANDLE_HALF_W     6
 #define HANDLE_HEIGHT     10
 
+/* 单击阈值：拖拽总偏移 < 该像素视为“单击”，触发选中回调 */
+#define CLICK_MOVE_PX     3.0
+
 typedef struct TrackRow {
     Album          *album;       /* 借用 */
     ProgressAxis   *axis;        /* 借用 */
@@ -52,6 +55,12 @@ typedef struct TrackRow {
     double          drag_initial_a;
     double          drag_initial_b;
     double          drag_start_x;     /* 落点 widget 局部 x */
+
+    /* 选中 / 单击语义 */
+    int             selected_pair_idx;     /* -1 表示无选中，仅用于渲染 */
+    int             candidate_pair_idx;    /* drag_begin 时色块命中，供 drag_end 判定 */
+    TrackPairSelectedFn pair_selected_cb;
+    gpointer            pair_selected_data;
 } TrackRow;
 
 /* ─── 数据访问辅助 ─────────────────────────────────────────────── */
@@ -103,10 +112,24 @@ on_bar_draw(GtkDrawingArea *area, cairo_t *cr,
         double xb = progress_axis_arc_to_px(tr->axis, b);
         if (xb < xa) { double tmp = xa; xa = xb; xb = tmp; }
 
-        /* 激活区色块 */
-        cairo_set_source_rgba(cr, 0.20, 0.45, 0.85, 0.25);
+        gboolean is_sel = ((int)i == tr->selected_pair_idx);
+
+        /* 激活区色块：选中时提升 alpha + 1.5px 深蓝描边 */
+        if (is_sel) {
+            cairo_set_source_rgba(cr, 0.20, 0.45, 0.85, 0.40);
+        } else {
+            cairo_set_source_rgba(cr, 0.20, 0.45, 0.85, 0.25);
+        }
         cairo_rectangle(cr, xa, 0, xb - xa, (double)height);
         cairo_fill(cr);
+
+        if (is_sel && (xb - xa) > 1.5) {
+            cairo_set_source_rgba(cr, 0.10, 0.30, 0.70, 1.0);
+            cairo_set_line_width(cr, 1.5);
+            cairo_rectangle(cr, xa + 0.75, 0.75,
+                            xb - xa - 1.5, (double)height - 1.5);
+            cairo_stroke(cr);
+        }
 
         /* 把手 */
         cairo_set_source_rgba(cr, 0.10, 0.30, 0.70, 0.95);
@@ -195,6 +218,7 @@ on_drag_begin(GtkGestureDrag *g, double start_x, double start_y,
         tr->drag_initial_a = p->a_arc;
         tr->drag_initial_b = p->b_arc;
         tr->drag_start_x   = start_x;
+        tr->candidate_pair_idx = -1;
     } else {
         /* 检查是否命中播放头线（优先于新建把手对） */
         double ph_px = progress_axis_get_playhead_px(tr->axis);
@@ -202,9 +226,26 @@ on_drag_begin(GtkGestureDrag *g, double start_x, double start_y,
             tr->drag_pair_idx = -1;
             tr->drag_playhead = TRUE;
             tr->drag_start_x  = start_x;
+            tr->candidate_pair_idx = -1;
             progress_axis_set_playhead_arc(tr->axis,
                 progress_axis_px_to_arc(tr->axis, start_x));
         } else {
+            /* 未命中把手/播放头：先检查是否点中某条“激活区色块”（xa<x<xb），
+             * 记录候选供 drag_end 判定单击；drag_end 会在偏移<3px 时触发选中回调。
+             * 该判定不阻断原有“创建新对”路径（偏移大时仍可拖出新对，
+             * 零宽重叠对会在 drag_end 被现有逻辑自动删除）。 */
+            int hit_pair = -1;
+            if (t->pairs) {
+                for (guint i = 0; i < t->pairs->len; i++) {
+                    const HandlePair *p = &g_array_index(t->pairs, HandlePair, i);
+                    double xa = progress_axis_arc_to_px(tr->axis, p->a_arc);
+                    double xb = progress_axis_arc_to_px(tr->axis, p->b_arc);
+                    if (xa > xb) { double tmp = xa; xa = xb; xb = tmp; }
+                    if (start_x > xa && start_x < xb) { hit_pair = (int)i; break; }
+                }
+            }
+            tr->candidate_pair_idx = hit_pair;
+
             /* 空白处：创建新把手对，A 落在落点，B 跟随光标 */
             double arc     = progress_axis_px_to_arc(tr->axis, start_x);
             int    new_idx = album_track_add_pair(tr->album, tr->track_idx,
@@ -274,15 +315,31 @@ static void
 on_drag_end(GtkGestureDrag *g, double offset_x, double offset_y,
             gpointer user_data)
 {
-    (void)g; (void)offset_x; (void)offset_y;
+    (void)g;
     TrackRow *tr = user_data;
     if (!tr) return;
 
     /* 播放头拖动结束 */
     if (tr->drag_playhead) {
         tr->drag_playhead = FALSE;
+        tr->candidate_pair_idx = -1;
         return;
     }
+
+    /* 判定“单击”：总偏移 < CLICK_MOVE_PX 且色块命中候选有效 → 触发选中回调。
+     * 该检测位于原“创建新对”逻辑之前，以便零宽重叠对仍可被下面的
+     * 逻辑清除。candidate_pair_idx 是取自拖拽前的快照，不受末尾新增
+     * pair 影响（末尾删除不会动中间下标）。 */
+    if (tr->candidate_pair_idx >= 0) {
+        double dx = offset_x; if (dx < 0) dx = -dx;
+        double dy = offset_y; if (dy < 0) dy = -dy;
+        if (dx < CLICK_MOVE_PX && dy < CLICK_MOVE_PX && tr->pair_selected_cb) {
+            tr->pair_selected_cb(tr->track_idx,
+                                  tr->candidate_pair_idx,
+                                  tr->pair_selected_data);
+        }
+    }
+    tr->candidate_pair_idx = -1;
 
     if (tr->drag_pair_idx < 0) return;
 
@@ -346,6 +403,8 @@ track_row_new(Album *album, ProgressAxis *axis,
     tr->track_idx     = track_idx;
     tr->bar           = bar;
     tr->drag_pair_idx = -1;
+    tr->selected_pair_idx  = -1;
+    tr->candidate_pair_idx = -1;
 
     if (bar) {
         g_object_add_weak_pointer(G_OBJECT(bar), (gpointer *)&tr->bar);
@@ -368,4 +427,37 @@ track_row_new(Album *album, ProgressAxis *axis,
     g_object_ref(bar);
     g_object_unref(b);
     return GTK_WIDGET(bar);
+}
+/* ─── 选中态 / 单击回调 setter ──────────────────────────── */
+
+static TrackRow *
+track_row_from_widget(GtkWidget *bar)
+{
+    if (!GTK_IS_WIDGET(bar)) return NULL;
+    return (TrackRow *)g_object_get_data(G_OBJECT(bar), "track-row");
+}
+
+void
+track_row_set_pair_selected_cb(GtkWidget *bar,
+                                TrackPairSelectedFn cb,
+                                gpointer user_data)
+{
+    TrackRow *tr = track_row_from_widget(bar);
+    if (!tr) return;
+    tr->pair_selected_cb   = cb;
+    tr->pair_selected_data = user_data;
+}
+
+void
+track_row_set_selected_pair(GtkWidget *bar, int pair_idx)
+{
+    TrackRow *tr = track_row_from_widget(bar);
+    if (!tr) return;
+    Track *t = track_row_get_track(tr);
+    int n = (t && t->pairs) ? (int)t->pairs->len : 0;
+    if (pair_idx < 0 || pair_idx >= n) pair_idx = -1;
+    if (tr->selected_pair_idx != pair_idx) {
+        tr->selected_pair_idx = pair_idx;
+        if (tr->bar) gtk_widget_queue_draw(GTK_WIDGET(tr->bar));
+    }
 }

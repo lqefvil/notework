@@ -12,10 +12,23 @@ static void album_page_clear(AlbumPage *p) {
     g_free(p->title);   p->title   = NULL;
 }
 
+static void album_pair_clear(HandlePair *p) {
+    if (!p) return;
+    if (p->bindings) {
+        g_array_free(p->bindings, TRUE);
+        p->bindings = NULL;
+    }
+}
+
 static void album_track_clear(Track *t) {
     if (!t) return;
     g_free(t->name); t->name = NULL;
-    if (t->pairs) { g_array_free(t->pairs, TRUE); t->pairs = NULL; }
+    if (t->pairs) {
+        for (guint i = 0; i < t->pairs->len; i++)
+            album_pair_clear(&g_array_index(t->pairs, HandlePair, i));
+        g_array_free(t->pairs, TRUE);
+        t->pairs = NULL;
+    }
 }
 
 Album *album_new(void) {
@@ -163,7 +176,7 @@ int album_track_add_pair(Album *a, int track_idx,
     if (!t) return -1;
     if (!t->pairs) t->pairs = g_array_new(FALSE, FALSE, sizeof(HandlePair));
     normalize_pair(&a_arc, &b_arc);
-    HandlePair p = { .a_arc = a_arc, .b_arc = b_arc };
+    HandlePair p = { .a_arc = a_arc, .b_arc = b_arc, .bindings = NULL };
     g_array_append_val(t->pairs, p);
     return (int)t->pairs->len - 1;
 }
@@ -172,6 +185,8 @@ gboolean album_track_remove_pair(Album *a, int track_idx, int pair_idx) {
     Track *t = album_track_at(a, track_idx);
     if (!t || !t->pairs) return FALSE;
     if (pair_idx < 0 || (guint)pair_idx >= t->pairs->len) return FALSE;
+    /* 释放该 pair 的 bindings GArray，避免内存泄漏 */
+    album_pair_clear(&g_array_index(t->pairs, HandlePair, (guint)pair_idx));
     g_array_remove_index(t->pairs, (guint)pair_idx);
     return TRUE;
 }
@@ -186,4 +201,90 @@ gboolean album_track_update_pair(Album *a, int track_idx, int pair_idx,
     p->a_arc = a_arc;
     p->b_arc = b_arc;
     return TRUE;
+}
+
+/* ─── 激活区域 ↔ 高亮绑定 ───────────────────────────────── */
+
+static HandlePair *album_pair_at(Album *a, int track_idx, int pair_idx) {
+    Track *t = album_track_at(a, track_idx);
+    if (!t || !t->pairs) return NULL;
+    if (pair_idx < 0 || (guint)pair_idx >= t->pairs->len) return NULL;
+    return &g_array_index(t->pairs, HandlePair, (guint)pair_idx);
+}
+
+static gboolean pair_bindings_contains(const HandlePair *p, guint64 hl_id) {
+    if (!p || !p->bindings) return FALSE;
+    for (guint i = 0; i < p->bindings->len; i++)
+        if (g_array_index(p->bindings, guint64, i) == hl_id) return TRUE;
+    return FALSE;
+}
+
+gboolean album_pair_bind_highlight(Album *a, int track_idx, int pair_idx,
+                                    guint64 hl_id) {
+    HandlePair *p = album_pair_at(a, track_idx, pair_idx);
+    if (!p) return FALSE;
+    if (hl_id == 0) return FALSE;
+    if (!p->bindings) p->bindings = g_array_new(FALSE, FALSE, sizeof(guint64));
+    if (pair_bindings_contains(p, hl_id)) return TRUE; /* 幂等 */
+    g_array_append_val(p->bindings, hl_id);
+    return TRUE;
+}
+
+gboolean album_pair_unbind_highlight(Album *a, int track_idx, int pair_idx,
+                                      guint64 hl_id) {
+    HandlePair *p = album_pair_at(a, track_idx, pair_idx);
+    if (!p || !p->bindings) return FALSE;
+    for (guint i = 0; i < p->bindings->len; i++) {
+        if (g_array_index(p->bindings, guint64, i) == hl_id) {
+            g_array_remove_index(p->bindings, i);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+gboolean album_pair_clear_bindings(Album *a, int track_idx, int pair_idx) {
+    HandlePair *p = album_pair_at(a, track_idx, pair_idx);
+    if (!p) return FALSE;
+    if (p->bindings && p->bindings->len > 0)
+        g_array_set_size(p->bindings, 0);
+    return TRUE;
+}
+
+GArray *album_pair_get_bindings(Album *a, int track_idx, int pair_idx) {
+    HandlePair *p = album_pair_at(a, track_idx, pair_idx);
+    return p ? p->bindings : NULL;
+}
+
+gboolean album_pair_has_binding(Album *a, int track_idx, int pair_idx,
+                                 guint64 hl_id) {
+    HandlePair *p = album_pair_at(a, track_idx, pair_idx);
+    return pair_bindings_contains(p, hl_id);
+}
+
+/* 全局反查：遍历所有页 → 所有图层（仅 LAYER_HIGHLIGHT） → 所有记录。
+ * 未命中返回 FALSE；out_* 可传 NULL。 */
+gboolean album_find_highlight_by_id(Album *a, guint64 hl_id,
+                                     int *out_page, int *out_layer, int *out_rec) {
+    if (!a || hl_id == 0) return FALSE;
+    int n_pages = album_page_count(a);
+    for (int pi = 0; pi < n_pages; pi++) {
+        AlbumPage *page = album_get_page(a, pi);
+        if (!page || !page->doc || !page->doc->layers) continue;
+        int n_layers = (int)page->doc->layers->len;
+        for (int li = 0; li < n_layers; li++) {
+            Layer *L = &g_array_index(page->doc->layers, Layer, li);
+            if (L->kind != LAYER_HIGHLIGHT || !L->highlights) continue;
+            for (guint ri = 0; ri < L->highlights->len; ri++) {
+                HighlightRecord *r = g_ptr_array_index(L->highlights, ri);
+                if (r && r->id == hl_id) {
+                    if (out_page)  *out_page  = pi;
+                    if (out_layer) *out_layer = li;
+                    if (out_rec)   *out_rec   = (int)ri;
+                    return TRUE;
+                }
+            }
+        }
+    }
+    return FALSE;
 }

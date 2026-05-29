@@ -36,10 +36,19 @@ typedef struct {
     GtkWidget *tool_erase;
     GtkWidget *tool_select;
     GtkWidget *tool_hl;
+    GtkWidget *tool_hl_erase;
+    GtkWidget *tool_rect;
+    GtkWidget *tool_ellipse;
+
+    /* 目标层切换 */
+    GtkWidget *target_path_btn;
+    GtkWidget *target_paint_btn;
+    gboolean   syncing_target; /* 防 toggled 信号回环 */
 
     GtkWidget *hl_global_spin;
     GtkWidget *hl_local_spin;
     GtkWidget *hl_delete_btn;
+    GtkWidget *pen_color_btn;
     gboolean   syncing_hl_width; /* 防 hl_local_spin 同步信号回环 */
 
     /* 视图缩放 */
@@ -377,6 +386,18 @@ static void on_hl_delete_clicked(GtkButton *btn, gpointer data) {
     doodle_canvas_delete_selected_highlight(win->canvas);
 }
 
+/* 笔色选择按钮：rgba 改变时同步到画布全局笔色 */
+static void on_pen_color_changed(GObject *btn, GParamSpec *ps, gpointer data) {
+    (void)ps;
+    WinState *win = data;
+    if (!win || !win->canvas) return;
+    const GdkRGBA *rgba =
+        gtk_color_dialog_button_get_rgba(GTK_COLOR_DIALOG_BUTTON(btn));
+    if (!rgba) return;
+    DRGBA c = { rgba->red, rgba->green, rgba->blue, rgba->alpha };
+    doodle_canvas_set_global_pen_color(win->canvas, c);
+}
+
 static void on_tool_toggled(GtkToggleButton *btn, gpointer data) {
     if (!gtk_toggle_button_get_active(btn)) return;
     WinState *win = data;
@@ -386,8 +407,27 @@ static void on_tool_toggled(GtkToggleButton *btn, gpointer data) {
     else if ((GtkWidget *)btn == win->tool_erase ) t = TOOL_ERASE;
     else if ((GtkWidget *)btn == win->tool_select) t = TOOL_SELECT;
     else if ((GtkWidget *)btn == win->tool_hl    ) t = TOOL_HIGHLIGHT;
+    else if ((GtkWidget *)btn == win->tool_hl_erase) t = TOOL_HL_ERASE;
+    else if ((GtkWidget *)btn == win->tool_rect  ) t = TOOL_RECT;
+    else if ((GtkWidget *)btn == win->tool_ellipse) t = TOOL_ELLIPSE;
     doodle_canvas_set_tool(win->canvas, t);
+    /* 工具切换可能强制改 paint_target（RECT/ELLIPSE → TRUE），同步到 segment */
+    if (win->target_path_btn && win->target_paint_btn) {
+        gboolean pt = doodle_canvas_get_paint_target(win->canvas);
+        win->syncing_target = TRUE;
+        gtk_toggle_button_set_active(
+            GTK_TOGGLE_BUTTON(pt ? win->target_paint_btn : win->target_path_btn), TRUE);
+        win->syncing_target = FALSE;
+    }
     update_highlight_panel(win);
+}
+
+static void on_target_toggled(GtkToggleButton *btn, gpointer data) {
+    WinState *win = data;
+    if (win->syncing_target) return;
+    if (!gtk_toggle_button_get_active(btn)) return;
+    gboolean paint = ((GtkWidget *)btn == win->target_paint_btn);
+    doodle_canvas_set_paint_target(win->canvas, paint);
 }
 
 static void on_hl_global_changed(GtkSpinButton *sp, gpointer data) {
@@ -479,9 +519,15 @@ static GtkWidget *build_view_internal(WinState *win) {
     win->tool_erase    = GTK_WIDGET(gtk_builder_get_object(b, "tool_erase_btn"));
     win->tool_select   = GTK_WIDGET(gtk_builder_get_object(b, "tool_select_btn"));
     win->tool_hl       = GTK_WIDGET(gtk_builder_get_object(b, "tool_hl_btn"));
+    win->tool_hl_erase = GTK_WIDGET(gtk_builder_get_object(b, "tool_hl_erase_btn"));
+    win->tool_rect     = GTK_WIDGET(gtk_builder_get_object(b, "tool_rect_btn"));
+    win->tool_ellipse  = GTK_WIDGET(gtk_builder_get_object(b, "tool_ellipse_btn"));
+    win->target_path_btn  = GTK_WIDGET(gtk_builder_get_object(b, "target_path_btn"));
+    win->target_paint_btn = GTK_WIDGET(gtk_builder_get_object(b, "target_paint_btn"));
     win->hl_global_spin= GTK_WIDGET(gtk_builder_get_object(b, "hl_global_spin"));
     win->hl_local_spin = GTK_WIDGET(gtk_builder_get_object(b, "hl_local_spin"));
     win->hl_delete_btn = GTK_WIDGET(gtk_builder_get_object(b, "hl_delete_btn"));
+    win->pen_color_btn = GTK_WIDGET(gtk_builder_get_object(b, "pen_color_btn"));
 
     /* 视图缩放按钮 */
     win->zoom_out_btn   = GTK_WIDGET(gtk_builder_get_object(b, "zoom_out_btn"));
@@ -497,6 +543,16 @@ static GtkWidget *build_view_internal(WinState *win) {
     g_signal_connect(win->tool_erase,  "toggled", G_CALLBACK(on_tool_toggled),  win);
     g_signal_connect(win->tool_select, "toggled", G_CALLBACK(on_tool_toggled),  win);
     g_signal_connect(win->tool_hl,     "toggled", G_CALLBACK(on_tool_toggled),  win);
+    g_signal_connect(win->tool_hl_erase,"toggled", G_CALLBACK(on_tool_toggled),  win);
+    g_signal_connect(win->tool_rect,    "toggled", G_CALLBACK(on_tool_toggled),  win);
+    g_signal_connect(win->tool_ellipse, "toggled", G_CALLBACK(on_tool_toggled),  win);
+
+    if (win->target_path_btn)
+        g_signal_connect(win->target_path_btn, "toggled",
+                         G_CALLBACK(on_target_toggled), win);
+    if (win->target_paint_btn)
+        g_signal_connect(win->target_paint_btn, "toggled",
+                         G_CALLBACK(on_target_toggled), win);
 
     g_signal_connect(win->hl_global_spin, "value-changed",
                      G_CALLBACK(on_hl_global_changed), win);
@@ -505,6 +561,16 @@ static GtkWidget *build_view_internal(WinState *win) {
     if (win->hl_delete_btn)
         g_signal_connect(win->hl_delete_btn, "clicked",
                          G_CALLBACK(on_hl_delete_clicked), win);
+
+    if (win->pen_color_btn) {
+        /* 把画布当前 pen_color 同步到按钮初始 rgba */
+        DRGBA pc = doodle_canvas_get_global_pen_color(win->canvas);
+        GdkRGBA rgba = { pc.r, pc.g, pc.b, pc.a > 0 ? pc.a : 1.0 };
+        gtk_color_dialog_button_set_rgba(
+            GTK_COLOR_DIALOG_BUTTON(win->pen_color_btn), &rgba);
+        g_signal_connect(win->pen_color_btn, "notify::rgba",
+                         G_CALLBACK(on_pen_color_changed), win);
+    }
 
     if (win->zoom_out_btn)
         g_signal_connect(win->zoom_out_btn,   "clicked",
@@ -584,6 +650,9 @@ void doodle_window_set_initial_tool(GtkWidget *win, Tool t) {
     case TOOL_ERASE:     btn = GTK_TOGGLE_BUTTON(s->tool_erase);  break;
     case TOOL_SELECT:    btn = GTK_TOGGLE_BUTTON(s->tool_select); break;
     case TOOL_HIGHLIGHT: btn = GTK_TOGGLE_BUTTON(s->tool_hl);     break;
+    case TOOL_HL_ERASE:  btn = GTK_TOGGLE_BUTTON(s->tool_hl_erase); break;
+    case TOOL_RECT:      btn = GTK_TOGGLE_BUTTON(s->tool_rect);    break;
+    case TOOL_ELLIPSE:   btn = GTK_TOGGLE_BUTTON(s->tool_ellipse); break;
     }
     if (btn) gtk_toggle_button_set_active(btn, TRUE);
     doodle_canvas_set_tool(s->canvas, t);

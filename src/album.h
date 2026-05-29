@@ -32,10 +32,13 @@ typedef struct {
 } Album;
 
 /* 一对把手 = 一段「激活区域」。a_arc/b_arc 为全局弧长（贯穿
- * 整本相册的弧长域，0..total_arc）。约定 a_arc <= b_arc。 */
+ * 整本相册的弧长域，0..total_arc）。约定 a_arc <= b_arc。
+ * bindings: 可选的高亮绑定列表，元素类型 guint64（HighlightRecord.id）；
+ * 仅存 hl_id，不存 page_idx/layer_idx/rec_idx，消除下标漂移。可能为 NULL。 */
 typedef struct {
-    double a_arc;
-    double b_arc;
+    double  a_arc;
+    double  b_arc;
+    GArray *bindings;   /* GArray<guint64>；可为 NULL，懒初始化 */
 } HandlePair;
 
 /* 轨道：名称 + 0..N 对把手。每对把手在轨道行上以两个三角把手 +
@@ -56,6 +59,24 @@ int       album_track_add_pair   (Album *a, int track_idx,
 gboolean  album_track_remove_pair(Album *a, int track_idx, int pair_idx);
 gboolean  album_track_update_pair(Album *a, int track_idx, int pair_idx,
                                   double a_arc, double b_arc);
+
+/* ─── 激活区域 ↔ 高亮绑定 ────────────────────────────────
+ * bindings 仅存 HighlightRecord.id。定位查找统一走
+ * album_find_highlight_by_id（全局反查），避免下标漂移。 */
+gboolean  album_pair_bind_highlight  (Album *a, int track_idx, int pair_idx,
+                                       guint64 hl_id);
+gboolean  album_pair_unbind_highlight(Album *a, int track_idx, int pair_idx,
+                                       guint64 hl_id);
+gboolean  album_pair_clear_bindings  (Album *a, int track_idx, int pair_idx);
+GArray   *album_pair_get_bindings    (Album *a, int track_idx, int pair_idx);
+gboolean  album_pair_has_binding     (Album *a, int track_idx, int pair_idx,
+                                       guint64 hl_id);
+
+/* 全局反查：在所有页的所有 LAYER_HIGHLIGHT 中查找 id == hl_id 的记录。
+ * 命中返回 TRUE 并写出 (page,layer,rec) 下标；未命中返回 FALSE。
+ * out_* 可传 NULL。 */
+gboolean  album_find_highlight_by_id(Album *a, guint64 hl_id,
+                                      int *out_page, int *out_layer, int *out_rec);
 
 Album    *album_new(void);
 void      album_free(Album *a);
@@ -111,6 +132,13 @@ cairo_surface_t **album_load_pdf_surfaces(GFile *file, int *out_n,
 
 GtkWidget *album_window_new(void);
 
+/* 从 album_window_new() 返回的 window 取出内部 Album*（用于命令行/远程
+ * 实例 import 文件场景）。无内置 album 时返回 NULL。 */
+Album    *album_window_get_album(GtkWidget *win);
+
+/* 通知 album 窗口刷新缩略图/图层面板（导入新页或外部修改后调用）。 */
+void      album_window_refresh  (GtkWidget *win);
+
 /* 内嵌视图：返回一个 GtkBox，包含完整的相册编辑 UI
  * （工具条 + 页缩略图 + 预览 + 图层面板）。
  * album 由调用方拥有且生命周期不短于该视图。 */
@@ -133,5 +161,10 @@ gboolean  album_track_remove(Album *a, int idx);
 typedef void (*AlbumChangedFn)(GtkWidget *album_view, gpointer user_data);
 void album_view_set_changed_cb(GtkWidget *album_view,
                                 AlbumChangedFn cb, gpointer user_data);
+
+/* 聚焦某条高亮记录于预览画布上（跳转后的视觉提示）。
+ * hl_id=0 表示清除。仅当当前页含该 hl_id 时生效；切页后仍保持该
+ * 状态，只是不同页上不绘制。该 API 不会切活动页。 */
+void album_view_set_focused_highlight(GtkWidget *album_view, guint64 hl_id);
 
 G_END_DECLS

@@ -46,6 +46,15 @@
                 <property name="policy">wide</property>
               </object>
             </property>
+            <child type="end">
+              <object class="GtkButton" id="snip_btn">
+                <property name="icon-name">camera-photo-symbolic</property>
+                <property name="tooltip-text">截图便签：打开 notework-snip 截图悬浮窗</property>
+                <style>
+                  <class name="flat"/>
+                </style>
+              </object>
+            </child>
           </object>
         </child>
 
@@ -165,6 +174,75 @@
                                 <property name="margin-top">4</property>
                                 <property name="margin-bottom">4</property>
                                 <property name="spacing">2</property>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+
+                    <!-- (4) 第三区：选中激活区域后展示其绑定的高亮记录列表 -->
+                    <child>
+                      <object class="GtkBox" id="bindings_panel">
+                        <property name="orientation">horizontal</property>
+                        <property name="height-request">60</property>
+                        <property name="hexpand">true</property>
+                        <child>
+                          <object class="GtkBox">
+                            <property name="orientation">vertical</property>
+                            <property name="width-request">160</property>
+                            <property name="margin-start">8</property>
+                            <property name="margin-end">8</property>
+                            <property name="margin-top">8</property>
+                            <property name="margin-bottom">8</property>
+                            <property name="spacing">6</property>
+                            <child>
+                              <object class="GtkLabel" id="bindings_title">
+                                <property name="label">未选中激活区域</property>
+                                <property name="halign">start</property>
+                                <property name="wrap">true</property>
+                                <property name="xalign">0</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkBox">
+                                <property name="orientation">horizontal</property>
+                                <property name="spacing">4</property>
+                                <child>
+                                  <object class="GtkButton" id="bindings_add_btn">
+                                    <property name="label">+ 添加</property>
+                                    <property name="sensitive">false</property>
+                                  </object>
+                                </child>
+                                <child>
+                                  <object class="GtkButton" id="bindings_clear_btn">
+                                    <property name="label">清空</property>
+                                    <property name="sensitive">false</property>
+                                  </object>
+                                </child>
+                                <child>
+                                  <object class="GtkButton" id="bindings_remove_pair_btn">
+                                    <property name="label">删除激活区域</property>
+                                    <property name="tooltip-text">从轨道中删除当前选中的激活区域</property>
+                                    <property name="sensitive">false</property>
+                                    <style>
+                                      <class name="destructive-action"/>
+                                    </style>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkScrolledWindow">
+                            <property name="hscrollbar-policy">never</property>
+                            <property name="vscrollbar-policy">automatic</property>
+                            <property name="hexpand">true</property>
+                            <property name="vexpand">true</property>
+                            <child>
+                              <object class="GtkListBox" id="bindings_list">
+                                <property name="selection-mode">single</property>
                               </object>
                             </child>
                           </object>

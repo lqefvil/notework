@@ -66,6 +66,10 @@ struct AlbumState {
     AlbumChangedFn changed_cb;
     gpointer       changed_data;
     GtkWidget     *view_widget;
+
+    /* 跳转后的聚焦高亮：在预览画布上额外描一道红边；0=未设。
+     * 仅当当前页含该 hl_id 时生效。 */
+    guint64        focus_hl_id;
 };
 
 static void al_state_free(gpointer p) {
@@ -201,6 +205,30 @@ static void preview_draw_cb(GtkDrawingArea *area, cairo_t *cr,
     }
 
     doodle_render_doc(cr, p->doc, alpha, (int)cw, (int)ch);
+
+    /* 跳转后聚焦描边：在当前页查找 id == focus_hl_id 的高亮记录，
+     * 额外描一道红色粗边，不受 apply alpha 影响。 */
+    if (st->focus_hl_id != 0 && p->doc && p->doc->layers) {
+        for (guint li = 0; li < p->doc->layers->len; li++) {
+            Layer *L = &g_array_index(p->doc->layers, Layer, li);
+            if (L->kind != LAYER_HIGHLIGHT || !L->visible || !L->highlights)
+                continue;
+            for (guint k = 0; k < L->highlights->len; k++) {
+                HighlightRecord *r = g_ptr_array_index(L->highlights, k);
+                if (!r || r->id != st->focus_hl_id || r->n < 2) continue;
+                cairo_save(cr);
+                cairo_set_source_rgba(cr, 1.00, 0.55, 0.05, 0.60);
+                cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
+                cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+                cairo_set_line_width(cr, r->width + 3.0);
+                cairo_move_to(cr, r->pt[0].x, r->pt[0].y);
+                for (gsize i = 1; i < r->n; i++)
+                    cairo_line_to(cr, r->pt[i].x, r->pt[i].y);
+                cairo_stroke(cr);
+                cairo_restore(cr);
+            }
+        }
+    }
     cairo_restore(cr);
 }
 
@@ -1013,6 +1041,28 @@ void album_view_set_changed_cb(GtkWidget *album_view,
     if (!st) return;
     st->changed_cb   = cb;
     st->changed_data = user_data;
+}
+
+void album_view_set_focused_highlight(GtkWidget *album_view, guint64 hl_id)
+{
+    if (!GTK_IS_WIDGET(album_view)) return;
+    AlbumState *st = g_object_get_data(G_OBJECT(album_view), "album-state");
+    if (!st) return;
+    st->focus_hl_id = hl_id;
+    if (GTK_IS_WIDGET(st->preview_canvas))
+        gtk_widget_queue_draw(st->preview_canvas);
+}
+
+Album *album_window_get_album(GtkWidget *win) {
+    if (!GTK_IS_WIDGET(win)) return NULL;
+    AlbumState *st = g_object_get_data(G_OBJECT(win), "album-state");
+    return st ? st->album : NULL;
+}
+
+void album_window_refresh(GtkWidget *win) {
+    if (!GTK_IS_WIDGET(win)) return;
+    AlbumState *st = g_object_get_data(G_OBJECT(win), "album-state");
+    if (st) refresh_all(st);
 }
 
 static void build_view_internal(AlbumState *st) {

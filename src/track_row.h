@@ -30,4 +30,17 @@ G_BEGIN_DECLS
 GtkWidget *track_row_new(Album *album, ProgressAxis *axis,
                           int track_idx, int bar_width_px);
 
+/* 「激活区域被单击选中」的回调。
+ * 在色块内（xa < x < xb）点击且拖拽偏移 < 3px 时触发。
+ * pair_idx 为 album->tracks[track_idx].pairs 中的下标。 */
+typedef void (*TrackPairSelectedFn)(int track_idx, int pair_idx, gpointer user_data);
+
+void track_row_set_pair_selected_cb(GtkWidget *bar,
+                                     TrackPairSelectedFn cb,
+                                     gpointer             user_data);
+
+/* 同步选中态（供 main.c 在选中变化、 album 刷新后调用）。
+ * pair_idx<0 表示无选中；越界会被裁到 -1。 */
+void track_row_set_selected_pair(GtkWidget *bar, int pair_idx);
+
 G_END_DECLS

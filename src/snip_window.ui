@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  snip_window.ui — 便签/截图悬浮窗
+  - HeaderBar: [截图] [打开图片] [保存到相册] [置顶]
+  - 中央: GtkPicture 显示当前贴图
+-->
+<interface>
+  <requires lib="gtk" version="4.10"/>
+  <requires lib="libadwaita" version="1.0"/>
+
+  <object class="AdwApplicationWindow" id="swin">
+    <property name="title">Notework — 便签</property>
+    <property name="default-width">420</property>
+    <property name="default-height">320</property>
+
+    <property name="content">
+      <object class="AdwToolbarView">
+        <child type="top">
+          <object class="AdwHeaderBar">
+            <child type="end">
+              <object class="GtkBox">
+                <property name="spacing">4</property>
+                <property name="css-classes">linked</property>
+                <child>
+                  <object class="GtkButton" id="capture_btn">
+                    <property name="label">截图</property>
+                    <property name="tooltip-text">选取屏幕区域截图（通过 xdg-desktop-portal 调用）</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="open_btn">
+                    <property name="label">打开图片</property>
+                    <property name="tooltip-text">从本地选择 jpg/png 加载</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="save_to_album_btn">
+                    <property name="label">保存到相册</property>
+                    <property name="tooltip-text">把当前图片保存为 PNG 并发送到 notework-album（自动新建/合并实例）</property>
+                    <property name="sensitive">false</property>
+                    <property name="css-classes">suggested-action</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkToggleButton" id="ontop_btn">
+                    <property name="label">置顶</property>
+                    <property name="active">true</property>
+                    <property name="tooltip-text">悬浮置顶（X11/XWayland 下通过 _NET_WM_STATE_ABOVE；纯 Wayland 启用周期 raise 兜底）</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <property name="content">
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <property name="hexpand">true</property>
+            <property name="vexpand">true</property>
+            <child>
+              <object class="GtkPicture" id="picture">
+                <property name="hexpand">true</property>
+                <property name="vexpand">true</property>
+                <property name="content-fit">contain</property>
+                <property name="alternative-text">尚未截图。点击「截图」框选屏幕区域，或「打开图片」选择本地图。</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel" id="status_label">
+                <property name="xalign">0</property>
+                <property name="margin-start">10</property>
+                <property name="margin-end">10</property>
+                <property name="margin-top">4</property>
+                <property name="margin-bottom">6</property>
+                <property name="label">尚未加载图像</property>
+                <property name="css-classes">dim-label</property>
+              </object>
+            </child>
+          </object>
+        </property>
+      </object>
+    </property>
+  </object>
+</interface>

@@ -51,12 +51,44 @@ static void on_activate(GApplication *app, gpointer user_data) {
     gtk_window_present(GTK_WINDOW(win));
 }
 
+/* 命令行 / 远程实例传入 GFile 列表时调用：
+ * 复用 activate 创建窗口 → 通过 album_view_new()/album_window_new() 暴露
+ * 的 view 取 album → album_import_files 导入。 */
+static void on_open(GApplication *app, gpointer files_p, gint n_files,
+                    const char *hint, gpointer user_data) {
+    (void)hint; (void)user_data;
+    /* 取得（或创建）相册主窗口 */
+    GList *windows = gtk_application_get_windows(GTK_APPLICATION(app));
+    GtkWindow *win = windows ? GTK_WINDOW(windows->data) : NULL;
+    if (!win) {
+        GtkWidget *w = album_window_new();
+        gtk_window_set_application(GTK_WINDOW(w), GTK_APPLICATION(app));
+        win = GTK_WINDOW(w);
+    }
+    /* album_window_new 内部把 Album* 通过 g_object_set_data 挂在 window 上，
+     * key 见 album_window.c 中 "album-state" 或类似；这里走 view API
+     * 取不到，改为通过 album_view_get_album_from_window 公共 API。
+     * 若该 API 缺失，先 present 窗口让用户用菜单导入 —— 当前最小实现。 */
+    (void)files_p; (void)n_files;
+    /* 直接借助 album_window_new 已挂载的 album 状态导入。
+     * 实现见 album_window.c：暴露 album_window_get_album()。 */
+    Album *a = album_window_get_album(GTK_WIDGET(win));
+    if (a) {
+        GFile **files = (GFile **)files_p;
+        album_import_files(a, files, n_files, NULL, NULL);
+        /* 触发界面刷新（importer 内部不会自动刷新缩略图） */
+        album_window_refresh(GTK_WIDGET(win));
+    }
+    gtk_window_present(win);
+}
+
 int main(int argc, char *argv[]) {
     g_log_set_writer_func(log_writer_filter, NULL, NULL);
     AdwApplication *app = adw_application_new(
-        "com.github.notework.album", G_APPLICATION_DEFAULT_FLAGS);
+        "com.github.notework.album", G_APPLICATION_HANDLES_OPEN);
     g_signal_connect(app, "startup",  G_CALLBACK(on_startup),  NULL);
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
+    g_signal_connect(app, "open",     G_CALLBACK(on_open),     NULL);
     int status = g_application_run(G_APPLICATION(app), argc, argv);
     g_object_unref(app);
     return status;
