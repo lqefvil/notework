@@ -88,6 +88,10 @@ void          progress_axis_clear_emphasized    (ProgressAxis *pa);
 /* 单点聚焦（跳转后的可视反馈）；id==0 等同于 clear。 */
 void          progress_axis_set_focused_highlight  (ProgressAxis *pa,
                                                      int page, guint64 hl_id);
+/* 带颜色 kind 的聚焦：kind=1（env 黄） / 2（var 绿） / 其他（默认红） */
+void          progress_axis_set_focused_highlight_kind(ProgressAxis *pa,
+                                                        int page, guint64 hl_id,
+                                                        int kind);
 void          progress_axis_clear_focused_highlight(ProgressAxis *pa);
 
 /* 拾取：在热力图绘制区域内命中某条高亮记录。命中返回 TRUE

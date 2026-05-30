@@ -43,4 +43,8 @@ void track_row_set_pair_selected_cb(GtkWidget *bar,
  * pair_idx<0 表示无选中；越界会被裁到 -1。 */
 void track_row_set_selected_pair(GtkWidget *bar, int pair_idx);
 
+/* 绑定面板点击「继承轨道」时，在被继承轨道 bar 上画 1.5px 紫色
+ * 虚线描边；on=FALSE 清除。仅影响视觉。 */
+void track_row_set_focus_highlight(GtkWidget *bar, gboolean on);
+
 G_END_DECLS

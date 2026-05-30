@@ -21,4 +21,7 @@
   <gresource prefix="/com/github/notework/doodle">
     <file preprocess="xml-stripblanks">doodle_window.ui</file>
   </gresource>
+  <gresource prefix="/com/github/notework/latex">
+    <file preprocess="xml-stripblanks">latex_window.ui</file>
+  </gresource>
 </gresources>

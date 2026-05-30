@@ -160,11 +160,11 @@
                 </child>
                 <child>
                   <object class="GtkSpinButton" id="hl_global_spin">
-                    <property name="tooltip-text">高亮全局默认粗细 (4–25 px)</property>
+                    <property name="tooltip-text">高亮全局默认粗细 (4–60 px)</property>
                     <property name="adjustment">
                       <object class="GtkAdjustment">
                         <property name="lower">4</property>
-                        <property name="upper">25</property>
+                        <property name="upper">60</property>
                         <property name="step-increment">1</property>
                         <property name="value">12</property>
                       </object>
@@ -173,12 +173,12 @@
                 </child>
                 <child>
                   <object class="GtkSpinButton" id="hl_local_spin">
-                    <property name="tooltip-text">当前选中高亮记录的粗细（先用「选择」工具点击某条高亮）</property>
+                    <property name="tooltip-text">当前选中高亮记录的粗细（先用「选择」工具点击某条高亮，4–60 px）</property>
                     <property name="sensitive">false</property>
                     <property name="adjustment">
                       <object class="GtkAdjustment">
                         <property name="lower">4</property>
-                        <property name="upper">25</property>
+                        <property name="upper">60</property>
                         <property name="step-increment">1</property>
                         <property name="value">12</property>
                       </object>

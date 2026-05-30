@@ -44,6 +44,7 @@ struct ProgressAxis {
     GArray           *emph_keys;     /* GArray<ProgressAxisHLKey>；可为 NULL */
     int               focus_page;    /* 跳转后聚焦的高亮页下标；-1 表示无 */
     guint64           focus_hl_id;   /* 0 表示无 */
+    int               focus_kind;    /* 0=红（默认） 1=黄（env） 2=绿（var） */
 };
 
 /* ─── 几何辅助 ──────────────────────────────────────────────────── */
@@ -292,7 +293,10 @@ draw_heatmap(ProgressAxis *pa, cairo_t *cr, int height)
                 if (pa->focus_hl_id != 0 &&
                     pa->focus_page == i && pa->focus_hl_id == r->id &&
                     (x1 - x0) > 1.5) {
-                    cairo_set_source_rgba(cr, 0.85, 0.10, 0.10, 1.0);
+                    double rr = 0.85, gg = 0.10, bb = 0.10;
+                    if (pa->focus_kind == 1)      { rr = 0.95; gg = 0.70; bb = 0.05; }
+                    else if (pa->focus_kind == 2) { rr = 0.15; gg = 0.65; bb = 0.20; }
+                    cairo_set_source_rgba(cr, rr, gg, bb, 1.0);
                     cairo_set_line_width(cr, 1.5);
                     cairo_rectangle(cr, x0 + 0.75, mid_y - 10.0 + 0.75,
                                     (x1 - x0) - 1.5, 20.0 - 1.5);
@@ -691,11 +695,21 @@ progress_axis_set_focused_highlight(ProgressAxis *pa, int page, guint64 hl_id)
     if (hl_id == 0) {
         pa->focus_page  = -1;
         pa->focus_hl_id = 0;
+        pa->focus_kind  = 0;
     } else {
         pa->focus_page  = page;
         pa->focus_hl_id = hl_id;
     }
     if (pa->canvas) gtk_widget_queue_draw(GTK_WIDGET(pa->canvas));
+}
+
+void
+progress_axis_set_focused_highlight_kind(ProgressAxis *pa,
+                                          int page, guint64 hl_id, int kind)
+{
+    if (!pa) return;
+    pa->focus_kind = (kind == 1 || kind == 2) ? kind : 0;
+    progress_axis_set_focused_highlight(pa, page, hl_id);
 }
 
 void

@@ -18,7 +18,7 @@
 
 /* 高亮参数：默认 12px，范围 [4, 25]。 */
 #define HIGHLIGHT_WIDTH_MIN    4.0
-#define HIGHLIGHT_WIDTH_MAX   25.0
+#define HIGHLIGHT_WIDTH_MAX   60.0
 #define HIGHLIGHT_WIDTH_DEF   12.0
 /* 路径吸附最大距离（超过该距离丢弃采样点） */
 #define HIGHLIGHT_SNAP_RADIUS 60.0

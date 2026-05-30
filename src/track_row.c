@@ -59,6 +59,7 @@ typedef struct TrackRow {
     /* 选中 / 单击语义 */
     int             selected_pair_idx;     /* -1 表示无选中，仅用于渲染 */
     int             candidate_pair_idx;    /* drag_begin 时色块命中，供 drag_end 判定 */
+    gboolean        focus_highlighted;     /* 继承绑定点击后画紫色虚线描边 */
     TrackPairSelectedFn pair_selected_cb;
     gpointer            pair_selected_data;
 } TrackRow;
@@ -144,6 +145,19 @@ on_bar_draw(GtkDrawingArea *area, cairo_t *cr,
     cairo_move_to(cr, ph_px, 0);
     cairo_line_to(cr, ph_px, (double)height);
     cairo_stroke(cr);
+
+    /* 继承绑定聚焦：紫色 1.5px 虚线描边贴 bar 边缘 */
+    if (tr->focus_highlighted) {
+        const double dashes[] = { 6.0, 4.0 };
+        cairo_save(cr);
+        cairo_set_source_rgba(cr, 0.55, 0.25, 0.85, 1.0);
+        cairo_set_line_width(cr, 1.5);
+        cairo_set_dash(cr, dashes, 2, 0);
+        cairo_rectangle(cr, 0.75, 0.75,
+                        (double)width - 1.5, (double)height - 1.5);
+        cairo_stroke(cr);
+        cairo_restore(cr);
+    }
 }
 
 /* ─── 吸附 ───────────────────────────────────────────────────── */
@@ -267,6 +281,22 @@ on_drag_begin(GtkGestureDrag *g, double start_x, double start_y,
     gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
 }
 
+/* 重绘同一 track_container 下所有 bar：拖动、级联推动后父轨道
+ * b_arc 可能被 cascade 修改，需要同步刷新 sibling 控制器的视觉。 */
+static void
+redraw_all_sibling_bars(TrackRow *tr)
+{
+    if (!tr || !tr->bar) return;
+    GtkWidget *parent = gtk_widget_get_parent(GTK_WIDGET(tr->bar));
+    if (!parent) {
+        gtk_widget_queue_draw(GTK_WIDGET(tr->bar));
+        return;
+    }
+    for (GtkWidget *c = gtk_widget_get_first_child(parent);
+         c; c = gtk_widget_get_next_sibling(c))
+        gtk_widget_queue_draw(c);
+}
+
 static void
 on_drag_update(GtkGestureDrag *g, double offset_x, double offset_y,
                gpointer user_data)
@@ -308,8 +338,10 @@ on_drag_update(GtkGestureDrag *g, double offset_x, double offset_y,
 
     album_track_update_pair(tr->album, tr->track_idx,
                              tr->drag_pair_idx, a, b);
-    if (tr->bar) gtk_widget_queue_draw(GTK_WIDGET(tr->bar));
+    redraw_all_sibling_bars(tr);
 }
+
+/* ─── drag-end：归一、零宽删除；不再有越界裁剪。 ───────── */
 
 static void
 on_drag_end(GtkGestureDrag *g, double offset_x, double offset_y,
@@ -326,10 +358,7 @@ on_drag_end(GtkGestureDrag *g, double offset_x, double offset_y,
         return;
     }
 
-    /* 判定“单击”：总偏移 < CLICK_MOVE_PX 且色块命中候选有效 → 触发选中回调。
-     * 该检测位于原“创建新对”逻辑之前，以便零宽重叠对仍可被下面的
-     * 逻辑清除。candidate_pair_idx 是取自拖拽前的快照，不受末尾新增
-     * pair 影响（末尾删除不会动中间下标）。 */
+    /* 判定“单击”：总偏移 < CLICK_MOVE_PX 且色块命中候选有效 → 触发选中回调。 */
     if (tr->candidate_pair_idx >= 0) {
         double dx = offset_x; if (dx < 0) dx = -dx;
         double dy = offset_y; if (dy < 0) dy = -dy;
@@ -344,24 +373,31 @@ on_drag_end(GtkGestureDrag *g, double offset_x, double offset_y,
     if (tr->drag_pair_idx < 0) return;
 
     Track *t = track_row_get_track(tr);
-    if (t && t->pairs &&
-        tr->drag_pair_idx < (int)t->pairs->len) {
-        HandlePair *p = &g_array_index(t->pairs, HandlePair,
-                                        (guint)tr->drag_pair_idx);
-        /* 归一 a<=b */
-        if (p->a_arc > p->b_arc) {
-            double tmp = p->a_arc; p->a_arc = p->b_arc; p->b_arc = tmp;
-        }
-        /* 创建模式下若最终零宽（纯点击），删除该对 */
-        if (tr->drag_creating && (p->b_arc - p->a_arc) < 1e-6) {
-            album_track_remove_pair(tr->album, tr->track_idx,
-                                     tr->drag_pair_idx);
-        }
+    if (!t || !t->pairs ||
+        tr->drag_pair_idx >= (int)t->pairs->len) {
+        tr->drag_pair_idx = -1;
+        tr->drag_creating = FALSE;
+        return;
+    }
+    HandlePair *p = &g_array_index(t->pairs, HandlePair,
+                                    (guint)tr->drag_pair_idx);
+    /* 归一 a<=b */
+    if (p->a_arc > p->b_arc) {
+        double tmp = p->a_arc; p->a_arc = p->b_arc; p->b_arc = tmp;
+    }
+    /* 创建模式下若最终零宽（纯点击），删除该对 */
+    if (tr->drag_creating && (p->b_arc - p->a_arc) < 1e-6) {
+        album_track_remove_pair(tr->album, tr->track_idx,
+                                 tr->drag_pair_idx);
+        tr->drag_pair_idx = -1;
+        tr->drag_creating = FALSE;
+        redraw_all_sibling_bars(tr);
+        return;
     }
 
     tr->drag_pair_idx = -1;
     tr->drag_creating = FALSE;
-    if (tr->bar) gtk_widget_queue_draw(GTK_WIDGET(tr->bar));
+    redraw_all_sibling_bars(tr);
 }
 
 /* ─── 控制器析构（挂在 bar 上） ─────────────────────────────── */
@@ -458,6 +494,18 @@ track_row_set_selected_pair(GtkWidget *bar, int pair_idx)
     if (pair_idx < 0 || pair_idx >= n) pair_idx = -1;
     if (tr->selected_pair_idx != pair_idx) {
         tr->selected_pair_idx = pair_idx;
+        if (tr->bar) gtk_widget_queue_draw(GTK_WIDGET(tr->bar));
+    }
+}
+
+void
+track_row_set_focus_highlight(GtkWidget *bar, gboolean on)
+{
+    TrackRow *tr = track_row_from_widget(bar);
+    if (!tr) return;
+    gboolean nv = on ? TRUE : FALSE;
+    if (tr->focus_highlighted != nv) {
+        tr->focus_highlighted = nv;
         if (tr->bar) gtk_widget_queue_draw(GTK_WIDGET(tr->bar));
     }
 }

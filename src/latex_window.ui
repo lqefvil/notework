@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  latex_window.ui — LaTeX 编辑/预览视图
+  顶层 GtkBox: 工具条 + 报错折叠面板 + 左右分栏（源码 / PDF 预览）
+-->
+<interface>
+  <requires lib="gtk" version="4.10"/>
+
+  <object class="GtkBox" id="latex_root">
+    <property name="orientation">vertical</property>
+    <property name="spacing">0</property>
+    <property name="hexpand">true</property>
+    <property name="vexpand">true</property>
+
+    <child>
+      <object class="GtkBox" id="toolbar">
+        <property name="orientation">horizontal</property>
+        <property name="spacing">6</property>
+        <property name="margin-start">8</property>
+        <property name="margin-end">8</property>
+        <property name="margin-top">6</property>
+        <property name="margin-bottom">6</property>
+        <child>
+          <object class="GtkButton" id="btn_compile">
+            <property name="label">编译</property>
+            <property name="tooltip-text">立即调用 xelatex 编译当前源码</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkLabel" id="status_label">
+            <property name="label">就绪</property>
+            <property name="halign">start</property>
+            <property name="hexpand">true</property>
+            <property name="margin-start">8</property>
+            <property name="ellipsize">end</property>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <child>
+      <object class="GtkExpander" id="err_expander">
+        <property name="label">编译报错（点击展开）</property>
+        <property name="visible">false</property>
+        <property name="margin-start">8</property>
+        <property name="margin-end">8</property>
+        <child>
+          <object class="GtkScrolledWindow">
+            <property name="hscrollbar-policy">automatic</property>
+            <property name="vscrollbar-policy">automatic</property>
+            <property name="min-content-height">72</property>
+            <property name="max-content-height">160</property>
+            <child>
+              <object class="GtkLabel" id="err_label">
+                <property name="label"></property>
+                <property name="wrap">true</property>
+                <property name="selectable">true</property>
+                <property name="xalign">0</property>
+                <property name="margin-start">8</property>
+                <property name="margin-end">8</property>
+                <property name="margin-top">4</property>
+                <property name="margin-bottom">4</property>
+                <style><class name="error"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+
+    <child>
+      <object class="GtkPaned" id="paned">
+        <property name="orientation">horizontal</property>
+        <property name="vexpand">true</property>
+        <property name="hexpand">true</property>
+        <property name="position">480</property>
+        <property name="wide-handle">true</property>
+        <child>
+          <object class="GtkScrolledWindow" id="src_scroll">
+            <property name="hscrollbar-policy">automatic</property>
+            <property name="vscrollbar-policy">automatic</property>
+            <property name="hexpand">true</property>
+            <property name="vexpand">true</property>
+            <child>
+              <object class="GtkTextView" id="src_view">
+                <property name="monospace">true</property>
+                <property name="left-margin">8</property>
+                <property name="right-margin">8</property>
+                <property name="top-margin">8</property>
+                <property name="bottom-margin">8</property>
+                <property name="wrap-mode">none</property>
+              </object>
+            </child>
+          </object>
+        </child>
+        <child>
+          <object class="GtkScrolledWindow" id="pdf_scroll">
+            <property name="hscrollbar-policy">automatic</property>
+            <property name="vscrollbar-policy">automatic</property>
+            <property name="hexpand">true</property>
+            <property name="vexpand">true</property>
+            <child>
+              <object class="GtkDrawingArea" id="pdf_area">
+                <property name="hexpand">true</property>
+                <property name="vexpand">true</property>
+                <property name="content-width">600</property>
+                <property name="content-height">800</property>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

@@ -28,17 +28,49 @@ typedef struct {
     GArray *pages;        /* AlbumPage（按值存储） */
     int     active;       /* 当前选中页下标；空相册时为 -1 */
     GArray *tracks;       /* Track（按值存储）。本期仅骨架，后期演进为
-                           * 全局轨道集合：跨页面聅合高亮区域 + 起止指针对。 */
+                           * 全局轨道集合：跨页面耧合高亮区域 + 起止指针对。 */
+    struct LatexDoc *latex; /* 随 album 生命周期的 LaTeX 文档（按需须创建） */
 } Album;
 
 /* 一对把手 = 一段「激活区域」。a_arc/b_arc 为全局弧长（贯穿
  * 整本相册的弧长域，0..total_arc）。约定 a_arc <= b_arc。
- * bindings: 可选的高亮绑定列表，元素类型 guint64（HighlightRecord.id）；
- * 仅存 hl_id，不存 page_idx/layer_idx/rec_idx，消除下标漂移。可能为 NULL。 */
+ * bindings: 绑定列表，元素类型 PairBinding（结构体）；可能为 NULL。
+ * 每条绑定带 kind + payload，支持五类：
+ *   · BIND_HL_ENV / BIND_HL_VAR：高亮记录（环境/变量），payload.hl_id
+ *   · BIND_LATEX_RANGE：LaTeX 源码字节范围，payload.range
+ *   · BIND_INHERIT_TRACK：继承同 album 内其他轨道，payload.inherit
+ *   · BIND_INHERIT_MASK：屏蔽某条来自继承链的条目，payload.mask */
+typedef enum {
+    BIND_HL_ENV        = 1,
+    BIND_HL_VAR        = 2,
+    BIND_LATEX_RANGE   = 3,
+    BIND_INHERIT_TRACK = 4,
+    BIND_INHERIT_MASK  = 5
+} BindKind;
+
+typedef struct {
+    BindKind kind;
+    union {
+        guint64 hl_id;                       /* HL_ENV / HL_VAR */
+        struct { int start; int length; } range; /* LATEX_RANGE：字节 offset/length */
+        struct {                             /* INHERIT_TRACK：父轨道索引（级联无条件沿继承链向上推） */
+            int      track_idx;
+        } inherit;
+        struct {                             /* INHERIT_MASK：被屏蔽目标 (kind+payload) */
+            BindKind target_kind;
+            union {
+                guint64 hl_id;
+                struct { int start; int length; } range;
+                int     track_idx;
+            } target;
+        } mask;
+    } payload;
+} PairBinding;
+
 typedef struct {
     double  a_arc;
     double  b_arc;
-    GArray *bindings;   /* GArray<guint64>；可为 NULL，懒初始化 */
+    GArray *bindings;   /* GArray<PairBinding>；可为 NULL，懒初始化 */
 } HandlePair;
 
 /* 轨道：名称 + 0..N 对把手。每对把手在轨道行上以两个三角把手 +
@@ -60,17 +92,47 @@ gboolean  album_track_remove_pair(Album *a, int track_idx, int pair_idx);
 gboolean  album_track_update_pair(Album *a, int track_idx, int pair_idx,
                                   double a_arc, double b_arc);
 
-/* ─── 激活区域 ↔ 高亮绑定 ────────────────────────────────
- * bindings 仅存 HighlightRecord.id。定位查找统一走
- * album_find_highlight_by_id（全局反查），避免下标漂移。 */
-gboolean  album_pair_bind_highlight  (Album *a, int track_idx, int pair_idx,
-                                       guint64 hl_id);
-gboolean  album_pair_unbind_highlight(Album *a, int track_idx, int pair_idx,
-                                       guint64 hl_id);
-gboolean  album_pair_clear_bindings  (Album *a, int track_idx, int pair_idx);
-GArray   *album_pair_get_bindings    (Album *a, int track_idx, int pair_idx);
-gboolean  album_pair_has_binding     (Album *a, int track_idx, int pair_idx,
-                                       guint64 hl_id);
+/* ─── 激活区域 ↔ 绑定（统一四类） ────────────────────────────
+ * 高亮绑定有 env/var 两个子 kind，可通过 album_pair_set_hl_kind 互转。
+ * LaTeX/继承绑定为新增类型。所有 add 接口幂等：相同 (kind, payload) 重复添加返回 TRUE。 */
+gboolean  album_pair_bind_hl          (Album *a, int track_idx, int pair_idx,
+                                        guint64 hl_id, BindKind kind);
+gboolean  album_pair_bind_latex_range (Album *a, int track_idx, int pair_idx,
+                                        int start, int length);
+gboolean  album_pair_bind_inherit_track(Album *a, int track_idx, int pair_idx,
+                                        int other_track_idx);
+
+/* 将已绑定的某条高亮在 env/var 之间切换。未找到该 hl_id 返回 FALSE。 */
+gboolean  album_pair_set_hl_kind      (Album *a, int track_idx, int pair_idx,
+                                        guint64 hl_id, BindKind new_kind);
+
+/* 统一解绑（按 kind+payload 唯一定位）。 */
+gboolean  album_pair_unbind           (Album *a, int track_idx, int pair_idx,
+                                        const PairBinding *bnd);
+
+gboolean  album_pair_clear_bindings   (Album *a, int track_idx, int pair_idx);
+GArray   *album_pair_get_bindings     (Album *a, int track_idx, int pair_idx);
+
+/* 判定是否已存在某条 hl 绑定（不区分 env/var）。 */
+gboolean  album_pair_has_hl_binding   (Album *a, int track_idx, int pair_idx,
+                                        guint64 hl_id);
+
+/* ─── 继承绑定的额外操作（mask + 树形遍历） ────────────── */
+
+/* 添加 / 移除 INHERIT_MASK：target 描述被屏蔽的 (kind, payload)。
+ * masked=TRUE 添加；masked=FALSE 移除。target 不能是 INHERIT_MASK。 */
+gboolean  album_pair_set_inherit_mask (Album *a, int track_idx, int pair_idx,
+                                        const PairBinding *target,
+                                        gboolean masked);
+
+/* 查询某条目是否已被本 pair 屏蔽（仅匹配 INHERIT_MASK 中 target_kind+target_payload）。 */
+gboolean  album_pair_is_inherit_masked(Album *a, int track_idx, int pair_idx,
+                                        const PairBinding *target);
+
+/* 探测：给定 self 是否能合法继承 candidate（环检测 + 深度检测，深度上限 8）。
+ * 返回 TRUE 表示可加；FALSE 表示会成环或超深度。candidate==self 也返回 FALSE。 */
+gboolean  album_inherit_can_bind      (Album *a, int self_track_idx,
+                                        int candidate_track_idx);
 
 /* 全局反查：在所有页的所有 LAYER_HIGHLIGHT 中查找 id == hl_id 的记录。
  * 命中返回 TRUE 并写出 (page,layer,rec) 下标；未命中返回 FALSE。
@@ -80,6 +142,9 @@ gboolean  album_find_highlight_by_id(Album *a, guint64 hl_id,
 
 Album    *album_new(void);
 void      album_free(Album *a);
+
+/* LaTeX 文档打包接口：按需创建与 album 同生命周期。返回的指针不需释放。 */
+struct LatexDoc *album_get_latex_doc(Album *a);
 
 int       album_page_count(const Album *a);
 AlbumPage*album_get_page  (Album *a, int idx);     /* 越界返回 NULL */

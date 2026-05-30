@@ -255,6 +255,22 @@
               </object>
             </child>
 
+            <!-- ── 页 3：LaTeX 输入 / 预览 ─────────────────── -->
+            <child>
+              <object class="AdwViewStackPage">
+                <property name="name">latex</property>
+                <property name="title">LaTeX</property>
+                <property name="icon-name">accessories-text-editor-symbolic</property>
+                <property name="child">
+                  <object class="GtkBox" id="latex_holder">
+                    <property name="orientation">vertical</property>
+                    <property name="hexpand">true</property>
+                    <property name="vexpand">true</property>
+                  </object>
+                </property>
+              </object>
+            </child>
+
           </object>
         </property>
 
